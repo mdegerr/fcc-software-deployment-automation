@@ -20,6 +20,7 @@ namespace SurumYakma
             ["İlerleme"] = "Progress",
             ["İşlem Konsolu"] = "Process Console",
             ["İptal"] = "Cancel",
+            ["Başlat"] = "Start",
             ["Relay Box Bağlantısı"] = "Relay Box Connection",
             ["Power Box Bağlantısı"] = "Power Box Connection",
             ["Gelişmiş Seçenekler"] = "Advanced Options",

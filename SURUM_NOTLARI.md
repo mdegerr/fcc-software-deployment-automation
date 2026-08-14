@@ -8,6 +8,9 @@ Bu dosya yayımlanan sürümler arasındaki işlevsel farkları kayıt altında 
 - İngilizce seçildiğinde kullanıcı mesajları, işlem durumu ve log mesajları İngilizce üretilir.
 - İngilizce arayüzde kalan karışık Türkçe/İngilizce metinler giderildi; kelime içi hatalı çeviri engellendi.
 - Ana ekran, bağlantı ayarları, gelişmiş seçenekler ve OTG/hata/başarı popup metinleri İngilizce regresyon testine bağlandı.
+- Dil değiştirildiğinde platformdaki **(Varsayılan)** eki İngilizce görünümde **(Default)** olarak yenilenir.
+- Ana işlem düğmesinin İngilizce metni dinamik UKB hedef seçimiyle birlikte korunur.
+- Ana ekran, UKB ayarları ve gelişmiş seçenekler için üç doğrulanmış İngilizce görsel README dosyasına eklendi.
 - OTG kablosu algılanmadığında işlem kullanıcıya modal uyarı verir. Kablo takılıp kullanıcı **Tamam** demeden sonraki Recovery denemesi başlamaz.
 - Başarılı sürüm yüklemesinden sonra Recovery **NORMAL**, UKS POWER **ON** bırakılır.
 - Sonuç penceresine renkli LINK IS UP durumu eklendi:

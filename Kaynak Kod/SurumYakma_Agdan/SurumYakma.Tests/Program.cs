@@ -18,8 +18,12 @@ using SurumYakma;
 internal static class Program
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length == 2 &&
+            args[0].Equals("--capture-docs", StringComparison.OrdinalIgnoreCase))
+            return CaptureEnglishDocumentationScreenshots(args[1]);
+
         string testRoot = Path.Combine(Path.GetTempPath(), "SurumYakmaTests-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -85,6 +89,103 @@ internal static class Program
             if (Directory.Exists(testRoot))
                 Directory.Delete(testRoot, true);
         }
+    }
+
+    private static int CaptureEnglishDocumentationScreenshots(string outputDirectory)
+    {
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            Localization.SetLanguage("EN");
+            var config = new AppConfig
+            {
+                NetworkInstallMode = true,
+                SelectedUkb = 1,
+                UiLanguage = "EN",
+                SerialPortName = "COM22",
+                PowerBoxIp = "10.135.1.60",
+                RelayBoxIp = "10.135.1.40",
+                NetworkServerPort = 8088,
+                VersionsRootPath = @"C:\Users\Operator\Desktop\UKB Versions"
+            };
+            config.MigrateLegacyTargetsToUnifiedTable();
+
+            using (var form = new Form1())
+            {
+                // Form1_Load gerçek makine ayarlarını yükler. Dokümantasyon görseli
+                // yalnızca aşağıdaki örnek EN yapılandırmasıyla hazırlanır.
+                Localization.SetLanguage("EN");
+                Type type = typeof(Form1);
+                MethodInfo loadMethod = type.GetMethod(
+                    "Form1_Load",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                form.Load -= (EventHandler)Delegate.CreateDelegate(
+                    typeof(EventHandler),
+                    form,
+                    loadMethod);
+                type.GetField("_cfg", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .SetValue(form, config);
+                type.GetField("_projectName", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .SetValue(form, "KSIMSEK");
+                type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("ConfigureProductionUi", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+
+                var projects = (ComboBox)type.GetField("projectList", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(form);
+                projects.Items.Clear();
+                projects.Items.Add("KSIMSEK (Varsayılan)");
+                projects.SelectedIndex = 0;
+                var status = (Label)type.GetField("lblStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(form);
+                status.Text = "Ready. Select a version package to start installation.";
+                type.GetMethod("UpdateMainActionButtonTexts", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("ApplyLanguage", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("RefreshProjectListLanguageSuffixes", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                CaptureForm(form, Path.Combine(outputDirectory, "01-main-installation-en.png"));
+            }
+
+            Localization.SetLanguage("EN");
+            Type dialogType = typeof(AppConfig).Assembly.GetType(
+                "SurumYakma.ConnectionSettingsForm",
+                throwOnError: true);
+            using (var dialog = (Form)Activator.CreateInstance(
+                dialogType,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                args: new object[] { config, "KSIMSEK", false },
+                culture: null))
+            {
+                TabControl tabs = Descendants(dialog).OfType<TabControl>().Single();
+                tabs.SelectedIndex = 0;
+                CaptureForm(dialog, Path.Combine(outputDirectory, "02-ukb-settings-en.png"));
+                tabs.SelectedIndex = 1;
+                CaptureForm(dialog, Path.Combine(outputDirectory, "03-advanced-options-en.png"));
+            }
+            Localization.SetLanguage("TR");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Screenshot generation failed: " + ex);
+            return 1;
+        }
+    }
+
+    private static void CaptureForm(Form form, string outputPath)
+    {
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(-20000, -20000);
+        form.Show();
+        Application.DoEvents();
+        using var bitmap = new Bitmap(form.Width, form.Height);
+        form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+        form.Hide();
     }
 
     private static void RunSettingsProfileStoreTest(string testRoot)

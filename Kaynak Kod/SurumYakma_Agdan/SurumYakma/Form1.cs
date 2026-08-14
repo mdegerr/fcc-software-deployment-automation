@@ -1208,7 +1208,7 @@ namespace SurumYakma
                 Logger.Diagnostic("Dil tercihi Settings.json dosyasına kaydedilemedi.", ex);
             }
             ApplyLanguage();
-            projectList?.Refresh();
+            RefreshProjectListLanguageSuffixes();
             Logger.Info(Localization.T(
                 "Uygulama dili Türkçe olarak değiştirildi.",
                 "Application language changed to English."));
@@ -1254,6 +1254,28 @@ namespace SurumYakma
                 return;
             e.Value = GetProjectNameFromDisplay(value) +
                 Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
+        }
+
+        private void RefreshProjectListLanguageSuffixes()
+        {
+            if (projectList == null)
+                return;
+
+            int selectedIndex = projectList.SelectedIndex;
+            for (int index = 0; index < projectList.Items.Count; index++)
+            {
+                string value = Convert.ToString(projectList.Items[index]) ?? "";
+                bool isDefault =
+                    value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase) ||
+                    value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase);
+                if (!isDefault)
+                    continue;
+                projectList.Items[index] = GetProjectNameFromDisplay(value) +
+                    Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
+            }
+            if (selectedIndex >= 0 && selectedIndex < projectList.Items.Count)
+                projectList.SelectedIndex = selectedIndex;
+            projectList.Refresh();
         }
 
         private void PopulateHelpGuide()
