@@ -1,0 +1,62 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+    <PlatformTarget>x86</PlatformTarget>
+    <Platforms>x86</Platforms>
+    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <AssemblyName>Sürüm Yükleme v-1.0.2</AssemblyName>
+    <RootNamespace>SurumYakma</RootNamespace>
+    <Title>Sürüm Yükleme v-1.0.2</Title>
+    <Product>Sürüm Yükleme v-1.0.2</Product>
+    <Description>UKB ağdan sürüm yükleme uygulaması</Description>
+    <Version>1.0.2</Version>
+    <AssemblyVersion>1.0.2.0</AssemblyVersion>
+    <FileVersion>1.0.2.0</FileVersion>
+    <ApplicationIcon>Assets\surum-yukleme.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Assets\surum-yukleme.ico" LogicalName="SurumYakma.Assets.surum-yukleme.ico" />
+    <EmbeddedResource Include="..\..\UKB\tezi\recovery\uuu.exe" LogicalName="SurumYakma.Tools.Tezi.Recovery.uuu.exe" />
+    <EmbeddedResource Include="..\..\UKB\tezi\recovery\uuu.auto" LogicalName="SurumYakma.Tools.Tezi.Recovery.uuu.auto" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.IO.Ports" Version="8.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\..\Shared\HardwareAutoConfigurator.cs" Link="Shared\HardwareAutoConfigurator.cs" />
+    <Compile Include="..\..\Shared\AdvancedSettings.cs" Link="Shared\AdvancedSettings.cs" />
+    <Compile Include="..\..\Shared\ConnectionSettingsForm.cs" Link="Shared\ConnectionSettingsForm.cs" />
+    <Compile Include="..\..\Shared\ModernUi.cs" Link="Shared\ModernUi.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Settings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </None>
+    <None Update="appsettings.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="appsettings.test.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="MXIO_NET.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <Content Include="..\..\UKB\tezi\**\*">
+      <Link>tools\tezi\%(RecursiveDir)%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../../Shared/Localization.cs" Link="Shared/Localization.cs" />
+  </ItemGroup>
+</Project>

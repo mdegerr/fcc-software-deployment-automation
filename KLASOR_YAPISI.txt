@@ -1,0 +1,24 @@
+SÜRÜM YÜKLEME v-1.0.0 - KLASÖR YAPISI
+=======================================
+
+Uygulama
+--------
+Hedef bilgisayara götürülecek çalışır pakettir.
+Uygulamayı "Sürüm Yükleme v-1.0.0.exe" dosyasından başlatın.
+Settings.json, bilgisayara özel appsettings dosyaları, tools ve logs bu klasörde tutulur.
+
+Kaynak Kod
+----------
+Yazılım geliştiriciler için kaynak kod, test projesi ve derleme bağımlılıklarıdır.
+Hedef bilgisayarda uygulamayı çalıştırmak için bu klasör gerekli değildir.
+
+Derleme:
+  dotnet build "Kaynak Kod\SurumYakma_Agdan\SurumYakma_Agdan.sln" -c Release
+
+Test:
+  dotnet run --project "Kaynak Kod\SurumYakma_Agdan\SurumYakma.Tests\SurumYakma.Tests.csproj" -c Release
+
+NOT
+---
+Kaynak Kod ve Uygulama klasörlerini birbirine karıştırmayın.
+Hedef sisteme yalnızca Uygulama klasörünü kopyalamak yeterlidir.
