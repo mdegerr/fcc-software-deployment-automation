@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
 namespace SurumYakma
@@ -41,6 +42,39 @@ namespace SurumYakma
             ["HTTP portu"] = "HTTP Port",
             ["Baud rate"] = "Baud Rate",
             ["Tamam"] = "OK"
+            ,["Sürüm Yükleme v-1.0.2"] = "Version Installation v-1.0.2"
+            ,["Bağlantı ve Donanım Ayarları"] = "Connection and Hardware Settings"
+            ,["1. Yüklenecek Sürüm"] = "1. Version to Install"
+            ,["2. Yüklenecek UKB"] = "2. Target UKB"
+            ,["3. Yükleme İşlemi"] = "3. Installation"
+            ,["UKB1 — SÜRÜM YÜKLEMEYİ BAŞLAT"] = "UKB1 — START VERSION INSTALLATION"
+            ,["USB-NCM PC adresini Easy Installer başladıktan sonra otomatik bul"] =
+                "Automatically detect the USB-NCM PC address after Easy Installer starts"
+            ,["TEZI paket ön adını ortam değişkenine göre doğrula"] =
+                "Validate the TEZI package prefix against the environment"
+            ,["Açıksa paket ön adı UAV_PROJECT_NAME ile karşılaştırılır. Kapalıysa ön ad kontrol edilmez; geçerli tam TEZI yapısı bulunması yeterlidir."] =
+                "When enabled, the package prefix is compared with UAV_PROJECT_NAME. When disabled, only a valid complete TEZI structure is required."
+            ,["Ortam / UAV_PROJECT_NAME"] = "Environment / UAV_PROJECT_NAME"
+            ,["TEZI paket adı / ön eki"] = "TEZI Package Name / Prefix"
+            ,["Moxa cihazlarına bağlanılıyor..."] = "Connecting to Moxa devices..."
+            ,["Ayar Hatası"] = "Settings Error"
+            ,["Ayarlar Kilitli"] = "Settings Locked"
+            ,["Yükleme Devam Ediyor"] = "Installation in Progress"
+            ,["Donanım Testi Hatası"] = "Hardware Test Error"
+            ,["Geçersiz Sürüm"] = "Invalid Version"
+            ,["Geçersiz Sürüm Paketi"] = "Invalid Version Package"
+            ,["Proje Eşleşme Hatası"] = "Project Match Error"
+            ,["Ağ Aktarım Hatası"] = "Network Transfer Error"
+            ,["Kritik Yükleme Hatası"] = "Critical Installation Error"
+            ,["Sürüm Yükleme Hatası"] = "Version Installation Error"
+            ,["Sürüm Yükleme Başarılı"] = "Version Installation Successful"
+            ,["OTG Kablo Bağlantısı Sağlanamadı"] = "OTG Cable Connection Failed"
+            ,["OTG Kablosunu Takın"] = "Connect the OTG Cable"
+            ,["Eksik Seçim"] = "Missing Selection"
+            ,["Geçersiz Hedef Disk"] = "Invalid Target Drive"
+            ,["Başarılı"] = "Successful"
+            ,["Hata"] = "Error"
+            ,["Uygulama Zaten Açık"] = "Application Already Running"
         };
 
         private static readonly KeyValuePair<string, string>[] Phrases =
@@ -61,10 +95,39 @@ namespace SurumYakma
             Pair("Sürüm Dosyaları UKB'ye Aktarılıyor ve Kuruluyor", "Transferring and installing version files"),
             Pair("OFP Sürümü ve Network Up Doğrulanıyor", "Verifying OFP version and Network Up"),
             Pair("Sürüm yüklendi ve doğrulandı", "Version installed and verified"),
+            Pair("Sürüm Yükleme", "Version Installation"),
             Pair("SÜRÜM YÜKLENDİ VE DOĞRULANDI", "VERSION INSTALLED AND VERIFIED"),
             Pair("SÜRÜM YÜKLEMEYİ BAŞLAT", "START VERSION INSTALLATION"),
             Pair("SÜRÜM YÜKLEME TAMAMLANDI", "VERSION INSTALLATION COMPLETED"),
             Pair("İşlem başlatılmadı", "Operation not started"),
+            Pair("Varsayılan", "Default"),
+            Pair("Aktif ortam algılanmadı.", "No active environment was detected."),
+            Pair("Aktif:", "Active:"),
+            Pair("Moxa cihazlarına bağlanılıyor...", "Connecting to Moxa devices..."),
+            Pair("Moxa cihazlarına bağlanılamadı", "Could not connect to Moxa devices"),
+            Pair("Arayüz hazır; donanım bağlantıları arka planda kuruluyor...", "Interface ready; hardware connections are being established in the background..."),
+            Pair("Başlangıç güvenliği:", "Startup safety:"),
+            Pair("projesine ait tam TEZI (*build.0) paketi bulunamadı.", "project's complete TEZI (*build.0) package was not found."),
+            Pair("Ham OFP dosyaları kurulum paketi değildir.", "Raw OFP files are not installation packages."),
+            Pair("Varsayılan bilgisayar projesi ortam değişkeninden okundu:", "Default computer platform read from environment variable:"),
+            Pair("Aktif sürüm platformu:", "Active version platform:"),
+            Pair("Bağlantı ayarları makine profiline kaydedildi ancak Settings.json güncellenemedi.", "Connection settings were saved to the machine profile, but Settings.json could not be updated."),
+            Pair("Kritik yükleme aşamasında işlem ekranından ayrılamazsınız.", "You cannot leave the operation screen during the critical installation stage."),
+            Pair("Devam eden/hazırlanmış ağ işlemi veya manuel kontrol varken bağlantı ayarları değiştirilemez.", "Connection settings cannot be changed while a network operation or manual inspection is active."),
+            Pair("Sürüm yükleme için PC'deki tam TEZI *build.0 paketini seçin.", "Select the complete TEZI *build.0 package on the PC for version installation."),
+            Pair("Seçili paket UAV_PROJECT_NAME projesiyle eşleşmiyor.", "The selected package does not match the UAV_PROJECT_NAME project."),
+            Pair("NetworkServerIp değerinin Windows USB-NCM bağdaştırıcısına ait olduğunu ipconfig ile doğrulayın.", "Use ipconfig to verify that NetworkServerIp belongs to the Windows USB-NCM adapter."),
+            Pair("Sürüm yükleme başlatılamadı.", "Version installation could not be started."),
+            Pair("Başarısız aşama:", "Failed stage:"),
+            Pair("Başarısız aşama ve nedeni ayrıntılı oturum loguna kaydedildi.", "The failed stage and its reason were recorded in the detailed session log."),
+            Pair("Lütfen disk ve sürüm seçin.", "Please select a drive and version."),
+            Pair("Güvenlik nedeniyle sürüm yalnızca çıkarılabilir bir flash belleğe hazırlanabilir.", "For safety, the version can only be prepared on a removable flash drive."),
+            Pair("Seçili sürüm bilgisayarın UAV_PROJECT_NAME projesiyle eşleşmiyor.", "The selected version does not match the computer's UAV_PROJECT_NAME project."),
+            Pair("Üretim yüklemesi yalnızca image.json, prepare.sh ve wrapup.sh içeren tam TEZI *build.0 paketiyle başlatılabilir. Ham OFP dosyası seçilemez.", "Production installation can only start with a complete TEZI *build.0 package containing image.json, prepare.sh and wrapup.sh. A raw OFP file cannot be selected."),
+            Pair("Sürüm yakma işlemi tamamlandı.", "Version installation completed."),
+            Pair("İşlem iptal edildi.", "Operation cancelled."),
+            Pair("İşlem hata ile durdu:", "Operation stopped with an error:"),
+            Pair("Ağdan sürüm yükleme uygulaması zaten açık. Açık olan pencereyi kullanın.", "The network version installation application is already running. Use the open window."),
             Pair("bağlandı", "connected"),
             Pair("bağlanamadı", "could not connect"),
             Pair("bağlantısı bekleniyor", "connection is pending"),
@@ -148,7 +211,15 @@ namespace SurumYakma
                 return exact;
             string translated = value;
             foreach (KeyValuePair<string, string> pair in Phrases.OrderByDescending(item => item.Key.Length))
-                translated = translated.Replace(pair.Key, pair.Value, StringComparison.OrdinalIgnoreCase);
+            {
+                string pattern =
+                    $@"(?<![\p{{L}}\p{{N}}_]){Regex.Escape(pair.Key)}(?![\p{{L}}\p{{N}}_])";
+                translated = Regex.Replace(
+                    translated,
+                    pattern,
+                    _ => pair.Value,
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            }
             return translated;
         }
 

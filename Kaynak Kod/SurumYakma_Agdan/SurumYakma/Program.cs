@@ -14,6 +14,18 @@ namespace SurumYakma
         [STAThread]
         static void Main()
         {
+            try
+            {
+                AppConfig startupConfig = AppConfig.Load();
+                string project = Environment.GetEnvironmentVariable("UAV_PROJECT_NAME") ?? "";
+                SettingsProfileStore.TryApplyCurrentProject(project, startupConfig, out _);
+                Localization.SetLanguage(startupConfig.UiLanguage);
+            }
+            catch
+            {
+                Localization.SetLanguage("TR");
+            }
+
             using var singleInstance = new Mutex(true, @"Local\UKB-SurumYakma-Agdan", out bool firstInstance);
             if (!firstInstance)
             {

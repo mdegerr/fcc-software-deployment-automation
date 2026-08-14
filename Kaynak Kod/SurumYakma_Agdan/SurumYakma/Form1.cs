@@ -17,6 +17,7 @@ namespace SurumYakma
         private const int NetworkStageCount = 12;
         private const int EasyInstallerEvidenceTimeoutSeconds = 45;
         private const string DefaultPlatformSuffix = " (Varsayılan)";
+        private const string EnglishDefaultPlatformSuffix = " (Default)";
 
         private AppConfig _cfg;
         private MoxaController _moxa;
@@ -1054,6 +1055,15 @@ namespace SurumYakma
             })
                 control.Top += 58;
 
+            foreach (Control control in new Control[]
+            {
+                lblStatus, lblStageProgress, UKB1Yak, UKB2Yak
+            })
+                control.TextChanged += LocalizeDynamicControlText;
+            TextChanged += LocalizeDynamicControlText;
+            projectList.FormattingEnabled = true;
+            projectList.Format += FormatProjectListItem;
+
             foreach (Label label in new[] { label2, label1, label3, lblHello })
                 ModernUi.StyleSectionLabel(label);
             foreach (Control input in new Control[] { projectList, textBox2, surumList, driveList })
@@ -1198,6 +1208,7 @@ namespace SurumYakma
                 Logger.Diagnostic("Dil tercihi Settings.json dosyasına kaydedilemedi.", ex);
             }
             ApplyLanguage();
+            projectList?.Refresh();
             Logger.Info(Localization.T(
                 "Uygulama dili Türkçe olarak değiştirildi.",
                 "Application language changed to English."));
@@ -1222,6 +1233,27 @@ namespace SurumYakma
                 PopulateHelpGuide();
             UpdateHeaderTabs();
             LayoutRuntimeControls();
+        }
+
+        private void LocalizeDynamicControlText(object sender, EventArgs e)
+        {
+            if (!Localization.IsEnglish || sender is not Control control)
+                return;
+            string translated = Localization.TranslateToEnglish(control.Text);
+            if (!string.Equals(control.Text, translated, StringComparison.Ordinal))
+                control.Text = translated;
+        }
+
+        private void FormatProjectListItem(object sender, ListControlConvertEventArgs e)
+        {
+            string value = Convert.ToString(e.ListItem) ?? "";
+            bool isDefault =
+                value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase) ||
+                value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase);
+            if (!isDefault)
+                return;
+            e.Value = GetProjectNameFromDisplay(value) +
+                Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
         }
 
         private void PopulateHelpGuide()
@@ -1397,7 +1429,9 @@ namespace SurumYakma
 
             if (_cfg.NetworkInstallMode)
             {
-                UKB1Yak.Text = $"UKB{_cfg.SelectedUkb} — SÜRÜM YÜKLEMEYİ BAŞLAT";
+                UKB1Yak.Text = Localization.T(
+                    $"UKB{_cfg.SelectedUkb} — SÜRÜM YÜKLEMEYİ BAŞLAT",
+                    $"UKB{_cfg.SelectedUkb} — START VERSION INSTALLATION");
                 UKB2Yak.Text = "";
                 return;
             }
@@ -1794,14 +1828,15 @@ namespace SurumYakma
                 .ThenBy(project => project, StringComparer.OrdinalIgnoreCase))
                 projectList.Items.Add(AppConfig.NormalizePlatformFolderKey(project) ==
                     AppConfig.NormalizePlatformFolderKey(environmentProject)
-                    ? project + DefaultPlatformSuffix
+                    ? project + Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix)
                     : project);
 
             string selectedDisplay = projectList.Items.Cast<string>().FirstOrDefault(project =>
                 AppConfig.NormalizePlatformFolderKey(GetProjectNameFromDisplay(project)) ==
                 AppConfig.NormalizePlatformFolderKey(preferredProject));
             if (string.IsNullOrWhiteSpace(selectedDisplay))
-                selectedDisplay = environmentProject + DefaultPlatformSuffix;
+                selectedDisplay = environmentProject +
+                    Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
             projectList.SelectedItem = selectedDisplay;
             _projectName = GetProjectNameFromDisplay(selectedDisplay);
             Logger.Info("Varsayılan bilgisayar platformu ortam değişkeninden okundu: " + environmentProject);
@@ -1922,9 +1957,11 @@ namespace SurumYakma
         private static string GetProjectNameFromDisplay(string display)
         {
             string value = (display ?? "").Trim();
-            return value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase)
-                ? value.Substring(0, value.Length - DefaultPlatformSuffix.Length).Trim()
-                : value;
+            if (value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase))
+                return value.Substring(0, value.Length - DefaultPlatformSuffix.Length).Trim();
+            if (value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase))
+                return value.Substring(0, value.Length - EnglishDefaultPlatformSuffix.Length).Trim();
+            return value;
         }
         private void driveList_SelectedIndexChanged(object sender, EventArgs e) => RefreshVersionList();
 

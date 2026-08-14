@@ -6,6 +6,8 @@ Bu dosya yayımlanan sürümler arasındaki işlevsel farkları kayıt altında 
 
 - Türkçe ve İngilizce arayüz seçimi eklendi; seçilen dil Settings.json profiline kaydedilir.
 - İngilizce seçildiğinde kullanıcı mesajları, işlem durumu ve log mesajları İngilizce üretilir.
+- İngilizce arayüzde kalan karışık Türkçe/İngilizce metinler giderildi; kelime içi hatalı çeviri engellendi.
+- Ana ekran, bağlantı ayarları, gelişmiş seçenekler ve OTG/hata/başarı popup metinleri İngilizce regresyon testine bağlandı.
 - OTG kablosu algılanmadığında işlem kullanıcıya modal uyarı verir. Kablo takılıp kullanıcı **Tamam** demeden sonraki Recovery denemesi başlamaz.
 - Başarılı sürüm yüklemesinden sonra Recovery **NORMAL**, UKS POWER **ON** bırakılır.
 - Sonuç penceresine renkli LINK IS UP durumu eklendi:

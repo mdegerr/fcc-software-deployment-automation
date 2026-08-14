@@ -57,6 +57,8 @@ internal static class Program
             Console.WriteLine("PASS: bundled recovery araclari atomik restore ve hash dogrulamasi");
             RunModernUiSmokeTest(true);
             Console.WriteLine("PASS: modern ağdan aktarım arayüzü yerleşim kontrolü");
+            RunEnglishUiSmokeTest();
+            Console.WriteLine("PASS: ana ekran dinamik Ingilizce metin ve Default platform gorunumu");
             RunSingleTargetUiSmokeTest();
             Console.WriteLine("PASS: UKB1/UKB2 tekli hedef seçimi ve seçili COM özeti");
             RunTeziHttpServerTest(testRoot);
@@ -136,6 +138,33 @@ internal static class Program
             "Ingilizce arayuz secimi uygulanmadi.");
         Assert(Localization.TranslateToEnglish("Uygulama başladı.") == "Application started.",
             "Log mesaji Ingilizceye cevrilemedi.");
+        Assert(Localization.TranslateToEnglish("Moxa cihazlarına bağlanılıyor...") ==
+               "Connecting to Moxa devices...",
+            "Moxa durum metni tam Ingilizceye cevrilemedi.");
+        Assert(!Localization.TranslateToEnglish("Moxa cihazlarına bağlanılıyor...")
+                   .Contains("bnetwork", StringComparison.OrdinalIgnoreCase),
+            "Kisa kelime cevirisi Turkce kelimenin icini bozdu.");
+        Assert(Localization.TranslateToEnglish("1. Yüklenecek Sürüm") ==
+               "1. Version to Install" &&
+               Localization.TranslateToEnglish("2. Yüklenecek UKB") ==
+               "2. Target UKB" &&
+               Localization.TranslateToEnglish("3. Yükleme İşlemi") ==
+               "3. Installation",
+            "Ana ekran basliklari tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish("Bağlantı ve Donanım Ayarları") ==
+               "Connection and Hardware Settings",
+            "Baglanti penceresi basligi tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish(
+                   "Sürüm yükleme başlatılamadı. Başarısız aşama: NETWORK_TEST") ==
+               "Version installation could not be started. Failed stage: NETWORK_TEST",
+            "Hata popup metni tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish("Uygulama Zaten Açık") ==
+               "Application Already Running" &&
+               Localization.TranslateToEnglish("OTG Kablosunu Takın") ==
+               "Connect the OTG Cable" &&
+               Localization.TranslateToEnglish("Sürüm Yükleme Başarılı") ==
+               "Version Installation Successful",
+            "Popup basliklarinin Ingilizce karsiliklari eksik.");
 
         var config = new AppConfig
         {
@@ -167,6 +196,25 @@ internal static class Program
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert(preservePower?.FieldType == typeof(bool) && resultDialog != null,
             "Basarili kurulumda Power ON veya renkli LINK sonuc korumasi eksik.");
+
+        Type dialogType = typeof(AppConfig).Assembly.GetType(
+            "SurumYakma.ConnectionSettingsForm",
+            throwOnError: true);
+        using (var dialog = (Form)Activator.CreateInstance(
+            dialogType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            args: new object[] { config, "KSIMSEK", false },
+            culture: null))
+        {
+            Assert(dialog.Text == "Connection and Hardware Settings",
+                "Baglanti penceresi Ingilizce baslikla acilmadi.");
+            string[] texts = Descendants(dialog).Select(control => control.Text).ToArray();
+            Assert(texts.Contains("Advanced Options") &&
+                   texts.Contains("Automatically detect the USB-NCM PC address after Easy Installer starts") &&
+                   texts.Contains("Validate the TEZI package prefix against the environment"),
+                "Baglanti/Gelismis ayarlarda Ingilizceye cevrilmemis kontroller var.");
+        }
         Localization.SetLanguage("TR");
     }
 
@@ -616,6 +664,56 @@ internal static class Program
             form.Hide();
         }
         SaveHelpSnapshot(form, type);
+    }
+
+    private static void RunEnglishUiSmokeTest()
+    {
+        Localization.SetLanguage("EN");
+        using var form = new Form1();
+        Type type = typeof(Form1);
+        var config = new AppConfig
+        {
+            NetworkInstallMode = true,
+            SelectedUkb = 1,
+            UiLanguage = "EN"
+        };
+        config.MigrateLegacyTargetsToUnifiedTable();
+        type.GetField("_cfg", BindingFlags.Instance | BindingFlags.NonPublic)
+            .SetValue(form, config);
+        type.GetField("_projectName", BindingFlags.Instance | BindingFlags.NonPublic)
+            .SetValue(form, "KSIMSEK");
+        type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+        type.GetMethod("ConfigureProductionUi", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+
+        var versionLabel = (Label)type.GetField("label3", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var targetLabel = (Label)type.GetField("lblTargetSelector", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var operationLabel = (Label)type.GetField("lblHello", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var status = (Label)type.GetField("lblStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var start = (Button)type.GetField("UKB1Yak", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var projects = (ComboBox)type.GetField("projectList", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+
+        status.Text = "Moxa cihazlarına bağlanılıyor...";
+        start.Text = "UKB1 — SÜRÜM YÜKLEMEYİ BAŞLAT";
+        form.Text = "Sürüm Yükleme v-1.0.2";
+        projects.Items.Add("KSIMSEK (Varsayılan)");
+
+        Assert(form.Text == "Version Installation v-1.0.2" &&
+               versionLabel.Text == "1. Version to Install" &&
+               targetLabel.Text == "2. Target UKB" &&
+               operationLabel.Text == "3. Installation" &&
+               status.Text == "Connecting to Moxa devices..." &&
+               start.Text == "UKB1 — START VERSION INSTALLATION" &&
+               projects.GetItemText(projects.Items[0]) == "KSIMSEK (Default)",
+            "Ana ekranda Turkce veya karisik Ingilizce metin kaldi.");
+        Localization.SetLanguage("TR");
     }
 
     private static void RunSingleTargetUiSmokeTest()
