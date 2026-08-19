@@ -4,7 +4,7 @@ UKB uçuş kontrol bilgisayarlarına USB-NCM üzerinden TEZI sürüm paketi yük
 
 ## Güncel sürüm
 
-Güncel kararlı sürüm: **v1.0.2**
+Güncel kararlı sürüm: **v1.0.3**
 
 Sürümler arasındaki farklar için [SURUM_NOTLARI.md](SURUM_NOTLARI.md) dosyasına bakın.
 

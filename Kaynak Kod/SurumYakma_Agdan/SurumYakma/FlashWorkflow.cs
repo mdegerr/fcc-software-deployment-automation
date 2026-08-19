@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
@@ -41,6 +42,11 @@ namespace SurumYakma
         private const string ExpectedRecoveryToolSha256 =
             "F6B76A6246BEFABEADFEBDC1CBFE58F35939596CAF7B78717CEAB599B0C85027";
         private const int RecoveryUsbMaximumAttempts = 3;
+        internal const int RecoveryPowerOffDwellMilliseconds = 3000;
+        internal const int RecoveryNormalSettleMilliseconds = 500;
+        internal const int RecoveryRealSetupMilliseconds = 750;
+        internal const int RecoveryPowerOnSettleMilliseconds = 1500;
+        internal const int KnownUsbWarningSeconds = 20;
 
         private readonly AppConfig _cfg;
         private readonly MoxaController _moxa;
@@ -55,10 +61,16 @@ namespace SurumYakma
             }
         }
 
+        private sealed class KnownUsbNotDetectedException : Exception
+        {
+            public KnownUsbNotDetectedException(string message) : base(message) { }
+        }
+
         public event Action OnWaitingForOtgConnect;
         public event Action OnWaitingForOtgDisconnect;
         public Func<CancellationToken, Task> WaitForOtgCableConfirmationAsync { get; set; }
-        public event Action OnOtgCableWaitWarning;
+        public Func<CancellationToken, Task> WaitForOtgDisconnectConfirmationAsync { get; set; }
+        public Func<CancellationToken, Task> WaitForOtgReconnectConfirmationAsync { get; set; }
         public event Action<bool> OnCriticalPhaseChanged;
         public event Action OnManualRecoveryRequired;
         public Func<string, CancellationToken, Task> WaitForUkbMediaReadyAsync { get; set; }
@@ -69,6 +81,104 @@ namespace SurumYakma
             _moxa = moxa;
             _versions = versions;
             _serial = serial;
+        }
+
+        internal static async Task ExecuteRecoveryBootSequenceAsync(
+            Func<uint, CancellationToken, Task> setPower,
+            Func<uint, CancellationToken, Task> setRecovery,
+            Func<TimeSpan, CancellationToken, Task> delay,
+            Func<CancellationToken, Task> whilePoweredOff,
+            CancellationToken ct)
+        {
+            if (setPower == null) throw new ArgumentNullException(nameof(setPower));
+            if (setRecovery == null) throw new ArgumentNullException(nameof(setRecovery));
+            if (delay == null) throw new ArgumentNullException(nameof(delay));
+
+            await setPower(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOffDwellMilliseconds), ct);
+            await setRecovery(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryNormalSettleMilliseconds), ct);
+            if (whilePoweredOff != null)
+                await whilePoweredOff(ct);
+            await setRecovery(1, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryRealSetupMilliseconds), ct);
+            await setPower(1, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOnSettleMilliseconds), ct);
+        }
+
+        internal static async Task ExecuteKnownUsbCleanRetrySequenceAsync(
+            Func<uint, CancellationToken, Task> setPower,
+            Func<uint, CancellationToken, Task> setRecovery,
+            Func<TimeSpan, CancellationToken, Task> delay,
+            Func<CancellationToken, Task> waitForDisconnect,
+            Func<CancellationToken, Task> waitForNormalBoot,
+            Func<CancellationToken, Task> waitForReconnect,
+            Func<CancellationToken, Task> rescanUsb,
+            CancellationToken ct)
+        {
+            if (setPower == null) throw new ArgumentNullException(nameof(setPower));
+            if (setRecovery == null) throw new ArgumentNullException(nameof(setRecovery));
+            if (delay == null) throw new ArgumentNullException(nameof(delay));
+            if (waitForDisconnect == null) throw new ArgumentNullException(nameof(waitForDisconnect));
+            if (waitForNormalBoot == null) throw new ArgumentNullException(nameof(waitForNormalBoot));
+            if (waitForReconnect == null) throw new ArgumentNullException(nameof(waitForReconnect));
+
+            // Eski UUU sureci bu metoda gelmeden tamamen sonlandirilmistir.
+            await setPower(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOffDwellMilliseconds), ct);
+            await setRecovery(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryNormalSettleMilliseconds), ct);
+
+            // Ilk popup yalnizca fiziksel cikarmayi ister; kablo henuz geri takilmaz.
+            await waitForDisconnect(ct);
+
+            await setPower(1, ct);
+            await waitForNormalBoot(ct);
+
+            // Normal acilis kanitlandiktan sonra temiz bir Recovery girisi hazirlanir.
+            await setPower(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOffDwellMilliseconds), ct);
+            await setRecovery(1, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryRealSetupMilliseconds), ct);
+
+            // Ikinci popup yalnizca yeniden baglamayi ister.
+            await waitForReconnect(ct);
+            await setPower(1, ct);
+            await delay(TimeSpan.FromMilliseconds(500), ct);
+            if (rescanUsb != null)
+                await rescanUsb(ct);
+            await delay(TimeSpan.FromMilliseconds(
+                Math.Max(0, RecoveryPowerOnSettleMilliseconds - 500)), ct);
+        }
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Unicode)]
+        private static extern int CM_Locate_DevNode(
+            out uint deviceInstance,
+            string deviceId,
+            uint flags);
+
+        [DllImport("cfgmgr32.dll")]
+        private static extern int CM_Reenumerate_DevNode(
+            uint deviceInstance,
+            uint flags);
+
+        private static async Task RequestWindowsUsbRescanAsync(CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            int locateResult = 0;
+            int rescanResult = 0;
+            await Task.Run(() =>
+            {
+                locateResult = CM_Locate_DevNode(out uint rootNode, null, 0);
+                if (locateResult == 0)
+                    rescanResult = CM_Reenumerate_DevNode(rootNode, 0);
+            }, ct);
+
+            string status = locateResult == 0 && rescanResult == 0 ? "SUCCESS" : "CONTINUE";
+            Logger.Checkpoint(
+                "WINDOWS_USB_PNP_RESCAN",
+                status,
+                $"locateResult={locateResult}; reenumerateResult={rescanResult}");
         }
 
         public async Task RunAsync(FlashRequest req, IProgress<FlashProgress> progress, CancellationToken ct)
@@ -278,7 +388,11 @@ namespace SurumYakma
                 ct.ThrowIfCancellationRequested();
                 try
                 {
-                    await RunRecoveryToolAttemptAsync(progress, ukbLabel, whichUkb, ct);
+                    await RunRecoveryToolAttemptAsync(
+                        progress,
+                        ukbLabel,
+                        whichUkb,
+                        ct);
                     if (attempt > 1)
                     {
                         Logger.Checkpoint(
@@ -287,6 +401,66 @@ namespace SurumYakma
                             $"ukb={ukbLabel}; attempt={attempt}/{RecoveryUsbMaximumAttempts}");
                     }
                     return;
+                }
+                catch (KnownUsbNotDetectedException ex) when (!ct.IsCancellationRequested)
+                {
+                    if (attempt >= RecoveryUsbMaximumAttempts)
+                    {
+                        Logger.Checkpoint(
+                            "OTG_CLEAN_SESSION_RETRY",
+                            "FAILED",
+                            $"ukb={ukbLabel}; attempts={attempt}; message={ex.Message}");
+                        throw new InvalidOperationException(
+                            $"{ukbLabel} USB recovery aygıtı {attempt} temiz UUU oturumunda da algılanamadı. " +
+                            "OTG kablosunu/hattını, doğrudan USB 2.0 bağlantısını ve Windows WinUSB sürücüsünü kontrol edin.",
+                            ex);
+                    }
+
+                    int nextAttempt = attempt + 1;
+                    Logger.Checkpoint(
+                        "OTG_CLEAN_SESSION_RETRY",
+                        "START",
+                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; " +
+                        "oldUuuProcess=terminated; sequence=unplug-normal-boot-poweroff-recovery-real-replug-new-uuu");
+                    Report(
+                        progress,
+                        42,
+                        $"{ukbLabel}: OTG aygıtı bulunamadı; temiz USB/UUU oturumu hazırlanıyor " +
+                        $"({nextAttempt}/{RecoveryUsbMaximumAttempts})...");
+
+                    long normalBootMark = _serial?.Mark() ?? 0;
+                    await ExecuteKnownUsbCleanRetrySequenceAsync(
+                        (value, token) => _moxa.SetPowerAsync(whichUkb, value, token),
+                        (value, token) => _moxa.SetRecoveryAsync(whichUkb, value, token),
+                        (duration, token) => Task.Delay(duration, token),
+                        WaitForOtgDisconnectConfirmationAsync ??
+                            WaitForOtgCableConfirmationAsync ??
+                            (_ => Task.CompletedTask),
+                        async token =>
+                        {
+                            Logger.Checkpoint(
+                                "OTG_NORMAL_BOOT_WITHOUT_CABLE",
+                                "START",
+                                $"ukb={ukbLabel}; timeoutSec=90; serialMark={normalBootMark}");
+                            string evidence = await _serial.WaitForNormalBootEvidenceAsync(
+                                normalBootMark,
+                                TimeSpan.FromSeconds(90),
+                                token);
+                            Logger.Checkpoint(
+                                "OTG_NORMAL_BOOT_WITHOUT_CABLE",
+                                "SUCCESS",
+                                $"ukb={ukbLabel}; evidence={evidence}");
+                        },
+                        WaitForOtgReconnectConfirmationAsync ??
+                            (_ => Task.CompletedTask),
+                        RequestWindowsUsbRescanAsync,
+                        ct);
+
+                    Logger.Checkpoint(
+                        "OTG_CLEAN_SESSION_RETRY",
+                        "READY",
+                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; " +
+                        "Power=ON; Recovery=REAL; action=start-fresh-uuu-process");
                 }
                 catch (UsbBulkTimeoutException ex) when (!ct.IsCancellationRequested)
                 {
@@ -317,17 +491,15 @@ namespace SurumYakma
                     Logger.Checkpoint(
                         "USB_BULK_RECOVERY_CYCLE",
                         "START",
-                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; sequence=PowerOFF-RecoveryNORMAL-RecoveryREAL-PowerON");
+                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; sequence=PowerOFF-3s-RecoveryNORMAL-500ms-RecoveryREAL-750ms-PowerON-1500ms");
                     try
                     {
-                        await _moxa.SetPowerAsync(whichUkb, 0, ct);
-                        await Task.Delay(TimeSpan.FromSeconds(2), ct);
-                        await _moxa.SetRecoveryAsync(whichUkb, 0, ct);
-                        await Task.Delay(TimeSpan.FromSeconds(1), ct);
-                        await _moxa.SetRecoveryAsync(whichUkb, 1, ct);
-                        await Task.Delay(TimeSpan.FromMilliseconds(500), ct);
-                        await _moxa.SetPowerAsync(whichUkb, 1, ct);
-                        await Task.Delay(TimeSpan.FromMilliseconds(2500), ct);
+                        await ExecuteRecoveryBootSequenceAsync(
+                            (value, token) => _moxa.SetPowerAsync(whichUkb, value, token),
+                            (value, token) => _moxa.SetRecoveryAsync(whichUkb, value, token),
+                            (duration, token) => Task.Delay(duration, token),
+                            null,
+                            ct);
                         Logger.Checkpoint(
                             "USB_BULK_RECOVERY_CYCLE",
                             "SUCCESS",
@@ -373,6 +545,7 @@ namespace SurumYakma
                 long knownUsbWaitStartedUtcTicks = 0;
                 int usbBulkTimeoutDetected = 0;
                 string usbBulkTimeoutLine = null;
+
                 proc.OutputDataReceived += (sender, args) =>
                 {
                     if (!string.IsNullOrWhiteSpace(args.Data))
@@ -387,6 +560,7 @@ namespace SurumYakma
                             args.Data,
                             ref waitingForKnownUsb,
                             ref knownUsbWaitStartedUtcTicks);
+
                     }
                 };
                 proc.ErrorDataReceived += (sender, args) =>
@@ -403,6 +577,7 @@ namespace SurumYakma
                             args.Data,
                             ref waitingForKnownUsb,
                             ref knownUsbWaitStartedUtcTicks);
+
                     }
                 };
 
@@ -411,12 +586,12 @@ namespace SurumYakma
 
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
+
+
                 DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(_cfg.RecoveryBatTimeoutSeconds);
                 DateTime warningAt = DateTime.MaxValue;
-                DateTime retryAt = DateTime.MaxValue;
                 long observedWaitStartTicks = 0;
                 bool warningSent = false;
-                int recoveryPowerCycles = 0;
 
                 try
                 {
@@ -449,14 +624,12 @@ namespace SurumYakma
                             {
                                 observedWaitStartTicks = waitStartTicks;
                                 DateTime waitStartedAt = new DateTime(waitStartTicks, DateTimeKind.Utc);
-                                warningAt = waitStartedAt + TimeSpan.FromSeconds(10);
-                                retryAt = waitStartedAt + TimeSpan.FromSeconds(25);
+                                warningAt = waitStartedAt + TimeSpan.FromSeconds(KnownUsbWarningSeconds);
                                 warningSent = false;
-                                recoveryPowerCycles = 0;
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
                                     "START",
-                                    $"ukb={ukbLabel}; warningAfterSeconds=10; firstRecoveryRetryAfterSeconds=25");
+                                    $"ukb={ukbLabel}; warningAfterSeconds={KnownUsbWarningSeconds}; recoveryPolicy=fresh-uuu-session");
                             }
 
                             // UUU bekleme satırı işlenirken başlangıç zamanı henüz görünür
@@ -477,57 +650,15 @@ namespace SurumYakma
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
                                     "WARNING",
-                                    $"ukb={ukbLabel}; elapsedMs={elapsedMs}; warningAfterSeconds=10");
-                                if (WaitForOtgCableConfirmationAsync != null)
-                                {
-                                    Logger.Checkpoint(
-                                        "OTG_USER_CONFIRMATION",
-                                        "WAIT",
-                                        $"ukb={ukbLabel}; instruction=connect-cable-and-press-ok");
-                                    await WaitForOtgCableConfirmationAsync(ct);
-                                    Logger.Checkpoint(
-                                        "OTG_USER_CONFIRMATION",
-                                        "SUCCESS",
-                                        $"ukb={ukbLabel}; userPressedOk=true");
-                                    retryAt = DateTime.UtcNow + TimeSpan.FromSeconds(15);
-                                }
-                                else
-                                {
-                                    OnOtgCableWaitWarning?.Invoke();
-                                }
-                            }
-
-                            if (DateTime.UtcNow >= retryAt && recoveryPowerCycles < 3)
-                            {
-                                recoveryPowerCycles++;
-                                Report(
-                                    progress,
-                                    42,
-                                    $"{ukbLabel}: OTG aygıtı algılanmadı; Recovery güç çevrimi yapılıyor " +
-                                    $"({recoveryPowerCycles}/3)...");
-                                Logger.Checkpoint(
-                                    "OTG_USB_RECOVERY_POWER_CYCLE",
-                                    "START",
-                                    $"ukb={ukbLabel}; attempt={recoveryPowerCycles}/3");
-                                await _moxa.SetPowerAsync(whichUkb, 0, ct);
-                                await Task.Delay(1200, ct);
-                                await _moxa.SetPowerAsync(whichUkb, 1, ct);
-                                Logger.Checkpoint(
-                                    "OTG_USB_RECOVERY_POWER_CYCLE",
-                                    "SUCCESS",
-                                    $"ukb={ukbLabel}; attempt={recoveryPowerCycles}/3");
-                                retryAt = DateTime.UtcNow + TimeSpan.FromSeconds(25);
-                            }
-                            else if (DateTime.UtcNow >= retryAt && recoveryPowerCycles >= 3)
-                            {
+                                    $"ukb={ukbLabel}; elapsedMs={elapsedMs}; warningAfterSeconds={KnownUsbWarningSeconds}");
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
-                                    "FAILED",
-                                    $"ukb={ukbLabel}; recoveryPowerCycles={recoveryPowerCycles}; reason=device-never-appeared");
-                                throw new TimeoutException(
-                                    $"{ukbLabel} OTG/USB recovery aygıtı üç otomatik güç çevriminden sonra algılanamadı. " +
-                                    "OTG kablosunu, bilgisayar USB portunu ve UKB Recovery MOD/kanal ayarını kontrol edin.");
+                                    "RESTART_REQUIRED",
+                                    $"ukb={ukbLabel}; reason=no-device-arrival; action=terminate-uuu-and-create-clean-session");
+                                throw new KnownUsbNotDetectedException(
+                                    $"{ukbLabel} UUU tarafından {KnownUsbWarningSeconds} saniye içinde algılanmadı.");
                             }
+
                         }
 
                         await Task.Delay(250, ct);
@@ -573,6 +704,7 @@ namespace SurumYakma
                    line.IndexOf("Fail Bulk(", StringComparison.OrdinalIgnoreCase) >= 0 &&
                    line.IndexOf("LIBUSB_ERROR_TIMEOUT", StringComparison.OrdinalIgnoreCase) >= 0;
         }
+
 
         private static void UpdateKnownUsbWaitState(
             string line,
@@ -622,7 +754,11 @@ namespace SurumYakma
             Logger.Checkpoint("EASY_INSTALLER_LOAD", "START", "ukb=" + ukbLabel);
             try
             {
-                await RunRecoveryToolAsync(progress, ukbLabel, whichUkb, ct);
+                await RunRecoveryToolAsync(
+                    progress,
+                    ukbLabel,
+                    whichUkb,
+                    ct);
                 Logger.Checkpoint("EASY_INSTALLER_LOAD", "SUCCESS", "ukb=" + ukbLabel);
             }
             catch (Exception ex)

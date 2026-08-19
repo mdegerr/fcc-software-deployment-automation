@@ -214,62 +214,57 @@ namespace SurumYakma
         /// TUK_7.1.12.26.0\tuk-Tezi_*build.0 yapısında görünen ad
         /// TUK_7.1.12.26.0, gerçek yükleme yolu ise içteki build.0 klasörüdür.
         /// </summary>
+        /// <summary>
+        /// Secili platform klasorunun yalnizca dogrudan alt klasorlerini surum olarak
+        /// listeler. Kullaniciya dis klasor adi gosterilir; yukleme icin bu klasorun
+        /// icindeki ilk gecerli tam TEZI paketinin gercek yolu kullanilir.
+        /// Paket veya image name on eki platform adiyla karsilastirilmaz.
+        /// </summary>
         public static VersionListResult GetSelectableTeziVersions(
             string repositoryPath,
             string projectName,
             IEnumerable<ProjectPackageMapping> mappings = null,
-            bool validateProjectPrefix = true)
+            bool validateProjectPrefix = false)
         {
-            string[] packagePaths = GetTeziPackagePaths(
-                repositoryPath,
-                projectName,
-                mappings,
-                validateProjectPrefix);
-            var versions = packagePaths
-                .Select(path => new
+            if (!Directory.Exists(repositoryPath))
+                return new VersionListResult
                 {
-                    Path = path,
-                    Name = GetVersionDisplayName(
-                        repositoryPath,
-                        path,
-                        projectName,
-                        mappings,
-                        validateProjectPrefix)
+                    Paths = Array.Empty<string>(),
+                    Names = Array.Empty<string>()
+                };
+
+            var versions = Directory.GetDirectories(repositoryPath, "*", SearchOption.TopDirectoryOnly)
+                .Where(path => !Path.GetFileName(path).StartsWith(
+                    ".surumyakma-",
+                    StringComparison.OrdinalIgnoreCase))
+                .Select(versionFolder => new
+                {
+                    Name = Path.GetFileName(versionFolder),
+                    PackagePath = FindLoadableTeziPackage(versionFolder)
                 })
                 .OrderByDescending(item => item.Name, NaturalVersionNameComparer.Instance)
                 .ToArray();
 
             return new VersionListResult
             {
-                Paths = versions.Select(item => item.Path).ToArray(),
+                Paths = versions.Select(item => item.PackagePath ?? Path.Combine(repositoryPath, item.Name)).ToArray(),
                 Names = versions.Select(item => item.Name).ToArray()
             };
         }
 
-        private static string GetVersionDisplayName(
-            string repositoryPath,
-            string packagePath,
-            string projectName,
-            IEnumerable<ProjectPackageMapping> mappings,
-            bool validateProjectPrefix)
+        private static string FindLoadableTeziPackage(string versionFolder)
         {
-            string repositoryFullPath = Path.GetFullPath(repositoryPath)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string packageFullPath = Path.GetFullPath(packagePath)
-                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            string relativePath = Path.GetRelativePath(repositoryFullPath, packageFullPath);
-            string[] parts = relativePath.Split(
-                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
-                StringSplitOptions.RemoveEmptyEntries);
+            if (IsTeziPackage(versionFolder))
+                return versionFolder;
 
-            if (parts.Length > 1 &&
-                (!validateProjectPrefix || PackageMatchesProject(parts[0], projectName, mappings)) &&
-                Regex.IsMatch(parts[0], @"\d+(?:\.\d+)+", RegexOptions.CultureInvariant))
-                return parts[0];
-
-            return Path.GetFileName(packageFullPath);
+            return Directory.GetDirectories(versionFolder, "*", SearchOption.AllDirectories)
+                .Where(IsTeziPackage)
+                .OrderBy(path => Path.GetRelativePath(versionFolder, path)
+                    .Count(character => character == Path.DirectorySeparatorChar ||
+                                        character == Path.AltDirectorySeparatorChar))
+                .ThenByDescending(Path.GetFileName, NaturalVersionNameComparer.Instance)
+                .FirstOrDefault();
         }
-
         public static string GetExpectedOfpVersion(string teziPackagePath)
         {
             if (!IsTeziPackage(teziPackagePath))
@@ -318,15 +313,8 @@ namespace SurumYakma
             var filteredNames = new List<string>();
             for (int i = 0; i < versionDirs.Length; i++)
             {
-                bool matches = !_cfg.ValidateTeziPackageNamePrefix || TeziPackageMatchesProject(
-                    versionDirs[i],
-                    selectedProject,
-                    _cfg.ProjectPackageMappings);
-                if (matches)
-                {
-                    filteredPaths.Add(versionDirs[i]);
-                    filteredNames.Add(Path.GetFileName(versionDirs[i]));
-                }
+                filteredPaths.Add(versionDirs[i]);
+                filteredNames.Add(Path.GetFileName(versionDirs[i]));
             }
             return new VersionListResult
             {
@@ -428,6 +416,7 @@ namespace SurumYakma
                 RemoveLicenseForUnattendedInstall(imageJson);
                 SetJsonBoolean(imageJson, "autoinstall", true);
                 EnsurePowerOff(wrapup);
+                ValidatePreparedNetworkPackage(preparingPath);
                 Directory.Move(preparingPath, readyPath);
                 Logger.Checkpoint(
                     "NETWORK_PACKAGE_PREPARE",
@@ -441,6 +430,70 @@ namespace SurumYakma
                     Directory.Delete(preparingPath, true);
                 throw;
             }
+        }
+
+        private static void ValidatePreparedNetworkPackage(string packageRoot)
+        {
+            string imageJsonPath = Path.Combine(packageRoot, "image.json");
+            JsonObject image = ReadJsonObject(imageJsonPath);
+            if (image["autoinstall"]?.GetValue<bool>() != true)
+                throw new InvalidOperationException("Ağ staging image.json dosyasında autoinstall=true doğrulanamadı.");
+            if (image.ContainsKey("license") || image.ContainsKey("license_title"))
+                throw new InvalidOperationException("Ağ staging image.json dosyasında etkileşimli lisans alanı kaldı.");
+            if (image["config_format"] != null)
+            {
+                string value = image["config_format"].ToString();
+                if (!int.TryParse(value, out int format) || format < 1)
+                    throw new InvalidOperationException("TEZI config_format değeri geçersiz: " + value);
+            }
+
+            var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectPackageReferences(image, null, references);
+            string root = Path.GetFullPath(packageRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            foreach (string reference in references)
+            {
+                if (Uri.TryCreate(reference, UriKind.Absolute, out Uri uri) &&
+                    (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                    continue;
+                string full = Path.GetFullPath(Path.Combine(packageRoot, reference.Replace('/', Path.DirectorySeparatorChar)));
+                if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("TEZI paket referansı paket dışına çıkıyor: " + reference);
+                if (!File.Exists(full))
+                    throw new FileNotFoundException("TEZI image.json tarafından kullanılan dosya bulunamadı: " + reference, full);
+                if (new FileInfo(full).Length == 0)
+                    throw new InvalidOperationException("TEZI image.json tarafından kullanılan dosya boş: " + reference);
+            }
+            Logger.Checkpoint("NETWORK_PACKAGE_MANIFEST_VALIDATE", "SUCCESS",
+                $"root={packageRoot}; referencedFiles={references.Count}; autoinstall=true; interactiveLicense=false");
+        }
+
+        private static void CollectPackageReferences(JsonNode node, string propertyName, ISet<string> references)
+        {
+            if (node == null) return;
+            if (node is JsonValue value)
+            {
+                if (IsPackageFileReferenceProperty(propertyName) &&
+                    value.TryGetValue<string>(out string path) && !string.IsNullOrWhiteSpace(path))
+                    references.Add(path.Trim());
+                return;
+            }
+            if (node is JsonObject obj)
+            {
+                foreach (KeyValuePair<string, JsonNode> item in obj)
+                    CollectPackageReferences(item.Value, item.Key, references);
+                return;
+            }
+            if (node is JsonArray array)
+                foreach (JsonNode item in array) CollectPackageReferences(item, propertyName, references);
+        }
+
+        private static bool IsPackageFileReferenceProperty(string propertyName)
+        {
+            return propertyName != null && new[]
+            {
+                "filename", "filelist", "image_filename", "u_boot_env", "prepare_script", "wrapup_script",
+                "error_script", "icon", "marketing", "releasenotes"
+            }.Contains(propertyName, StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>Flash bellekte zaten duran bir sürümü, üzerine kurulacak şekilde işaretler (autoinstall=true, poweroff -f).</summary>

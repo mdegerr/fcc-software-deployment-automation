@@ -21,13 +21,14 @@ namespace SurumYakma
         private const string ServiceType = "_tezi._tcp.local";
         // Toradex'in resmî Avahi tanımında servis örnek adı ile TXT name alanı
         // birebir aynıdır; aynı yapıyı koruyarak TEZI sürümleriyle uyumu artır.
-        private const string DisplayName = "Custom Toradex Easy Installer Feed";
-        private const string InstanceName = DisplayName + "._tezi._tcp.local";
-        private const string HostName = "ukb-surum-yakma.local";
+        private const string DisplayNamePrefix = "Custom Toradex Easy Installer Feed";
 
         private readonly IPAddress _bindAddress;
         private readonly int _httpPort;
         private readonly string _feedPath;
+        private readonly string _displayName;
+        private readonly string _instanceName;
+        private readonly string _hostName;
         private UdpClient _udp;
         private CancellationTokenSource _cancellation;
         private Task _loopTask;
@@ -43,6 +44,10 @@ namespace SurumYakma
                 throw new ArgumentOutOfRangeException(nameof(httpPort));
             _httpPort = httpPort;
             _feedPath = string.IsNullOrWhiteSpace(feedPath) ? "/image_list.json" : feedPath;
+            string suffix = string.Join("-", _bindAddress.GetAddressBytes());
+            _displayName = DisplayNamePrefix + " " + suffix;
+            _instanceName = _displayName + "." + ServiceType;
+            _hostName = "ukb-surum-yakma-" + suffix + ".local";
         }
 
         public bool IsRunning => _udp != null;
@@ -82,13 +87,15 @@ namespace SurumYakma
 
         private async Task RunAsync(CancellationToken ct)
         {
-            byte[] response = BuildResponsePacket(_bindAddress, _httpPort, _feedPath, 120);
+            byte[] response = BuildResponsePacket(
+                _bindAddress, _httpPort, _feedPath, 120,
+                _displayName, _instanceName, _hostName);
             var multicastEndpoint = new IPEndPoint(MulticastAddress, MdnsPort);
 
             Logger.Checkpoint(
                 "TEZI_MDNS_PACKET",
                 "READY",
-                $"bytes={response.Length}; instance={DisplayName}; hex={ToHex(response)}");
+                $"bytes={response.Length}; instance={_displayName}; host={_hostName}; hex={ToHex(response)}");
 
             try
             {
@@ -208,14 +215,33 @@ namespace SurumYakma
 
         public static byte[] BuildAnnouncementPacketForTest(string ip, int port, string feedPath)
         {
-            return BuildResponsePacket(IPAddress.Parse(ip), port, feedPath, 120);
+            IPAddress address = IPAddress.Parse(ip);
+            string suffix = string.Join("-", address.GetAddressBytes());
+            string displayName = DisplayNamePrefix + " " + suffix;
+            return BuildResponsePacket(
+                address, port, feedPath, 120, displayName,
+                displayName + "." + ServiceType,
+                "ukb-surum-yakma-" + suffix + ".local");
         }
 
+        public static byte[] BuildGoodbyePacketForTest(string ip, int port, string feedPath)
+        {
+            IPAddress address = IPAddress.Parse(ip);
+            string suffix = string.Join("-", address.GetAddressBytes());
+            string displayName = DisplayNamePrefix + " " + suffix;
+            return BuildResponsePacket(
+                address, port, feedPath, 0, displayName,
+                displayName + "." + ServiceType,
+                "ukb-surum-yakma-" + suffix + ".local");
+        }
         private static byte[] BuildResponsePacket(
             IPAddress address,
             int port,
             string feedPath,
-            uint ttl)
+            uint ttl,
+            string displayName,
+            string instanceName,
+            string hostName)
         {
             using var output = new MemoryStream();
             WriteUInt16(output, 0);       // transaction id
@@ -225,21 +251,21 @@ namespace SurumYakma
             WriteUInt16(output, 0);       // authority
             WriteUInt16(output, 3);       // additional: SRV + TXT + A
 
-            WriteRecord(output, ServiceType, 12, 1, ttl, EncodeName(InstanceName));
+            WriteRecord(output, ServiceType, 12, 1, ttl, EncodeName(instanceName));
 
             using (var srv = new MemoryStream())
             {
                 WriteUInt16(srv, 0);
                 WriteUInt16(srv, 0);
                 WriteUInt16(srv, (ushort)port);
-                byte[] host = EncodeName(HostName);
+                byte[] host = EncodeName(hostName);
                 srv.Write(host, 0, host.Length);
-                WriteRecord(output, InstanceName, 33, 0x8001, ttl, srv.ToArray());
+                WriteRecord(output, instanceName, 33, 0x8001, ttl, srv.ToArray());
             }
 
             var txt = new List<string>
             {
-                "name=" + DisplayName,
+                "name=" + displayName,
                 "path=" + feedPath,
                 "enabled=1",
                 "https=0"
@@ -254,19 +280,19 @@ namespace SurumYakma
                     txtData.WriteByte((byte)bytes.Length);
                     txtData.Write(bytes, 0, bytes.Length);
                 }
-                WriteRecord(output, InstanceName, 16, 0x8001, ttl, txtData.ToArray());
+                WriteRecord(output, instanceName, 16, 0x8001, ttl, txtData.ToArray());
             }
 
-            WriteRecord(output, HostName, 1, 0x8001, ttl, address.GetAddressBytes());
+            WriteRecord(output, hostName, 1, 0x8001, ttl, address.GetAddressBytes());
             return output.ToArray();
         }
 
-        private static bool IsRelevantQuery(byte[] packet)
+        private bool IsRelevantQuery(byte[] packet)
         {
             return GetQuestions(packet).Any(q =>
                 q.Name.Equals(ServiceType, StringComparison.OrdinalIgnoreCase) ||
-                q.Name.Equals(InstanceName, StringComparison.OrdinalIgnoreCase) ||
-                q.Name.Equals(HostName, StringComparison.OrdinalIgnoreCase));
+                q.Name.Equals(_instanceName, StringComparison.OrdinalIgnoreCase) ||
+                q.Name.Equals(_hostName, StringComparison.OrdinalIgnoreCase));
         }
 
         private static string DescribeQuestions(byte[] packet)
@@ -413,7 +439,45 @@ namespace SurumYakma
 
         public void Dispose()
         {
+            // Stop the response loop first. Otherwise a periodic announcement racing
+            // with the TTL=0 goodbye could put the stale UKB service back into cache.
             _cancellation?.Cancel();
+            bool loopStopped = true;
+            try
+            {
+                if (_loopTask != null)
+                    loopStopped = _loopTask.Wait(1000);
+            }
+            catch
+            {
+                loopStopped = _loopTask == null || _loopTask.IsCompleted;
+            }
+
+            if (_udp != null && loopStopped)
+            {
+                try
+                {
+                    byte[] goodbye = BuildResponsePacket(
+                        _bindAddress, _httpPort, _feedPath, 0,
+                        _displayName, _instanceName, _hostName);
+                    var endpoint = new IPEndPoint(MulticastAddress, MdnsPort);
+                    _udp.Send(goodbye, goodbye.Length, endpoint);
+                    Logger.Checkpoint(
+                        "TEZI_MDNS_GOODBYE", "SENT",
+                        $"interface={_bindAddress}; instance={_displayName}; ttl=0; loopStopped=true");
+                }
+                catch (Exception ex)
+                {
+                    Logger.Checkpoint("TEZI_MDNS_GOODBYE", "FAILED", ex.Message);
+                }
+            }
+            else if (_udp != null)
+            {
+                Logger.Checkpoint(
+                    "TEZI_MDNS_GOODBYE", "SKIPPED",
+                    "reason=response-loop-did-not-stop; stale-reannounce-prevention=true");
+            }
+
             try { _udp?.DropMulticastGroup(MulticastAddress); } catch { }
             try { _udp?.Close(); } catch { }
             try { _loopTask?.Wait(1000); } catch { }
