@@ -1,8 +1,20 @@
-# Sürüm Yükleme
+# UKB Software Deployment & Recovery Automation
 
-Windows üzerinden UKB uçuş kontrol bilgisayarlarına doğrulanmış TEZI yazılım paketleri yüklemek için geliştirilmiş saha otomasyon uygulamasıdır.
+**UKB uçuş kontrol bilgisayarlarına doğrulanmış TEZI yazılım paketlerini güvenli, tekrarlanabilir ve izlenebilir biçimde dağıtan Windows saha otomasyon platformu.**
 
 Uygulama; Moxa Power/Recovery kontrolünü, seri konsol doğrulamasını, USB-NCM ağ hazırlığını, yerel TEZI paket sunumunu, kurulum takibini ve kurulum sonrası OFP sürüm kontrolünü tek bir denetlenebilir işlem akışında birleştirir.
+
+## Öne çıkan yetkinlikler
+
+| Yetkinlik | Kullanıcıya sağladığı değer |
+|---|---|
+| Uçtan uca iş akışı | Birden fazla araç ve manuel adımı tek arayüzden, doğru sırayla yönetir. |
+| Donanım orkestrasyonu | Seçili UKB’nin Power ve Recovery kanallarını Moxa üzerinden kontrol eder ve geri okuyarak doğrular. |
+| Dinamik hedef profilleri | UKB1–UKB6 için COM, güç ve Recovery eşleştirmelerini merkezi yapılandırmada saklar. |
+| Güvenli paket dağıtımı | TEZI paket yapısını doğrular, Easy Installer ortamını hazırlar ve yalnızca seçilen hedefe aktarım yapar. |
+| Saha taşınabilirliği | Windows 10/11 bilgisayarlarda değişen COM ve USB-NCM koşullarına uyarlanabilen profil tabanlı yapı sunar. |
+| Operasyonel izlenebilirlik | Her kritik adımı zaman damgalı loglar ve checkpoint kayıtlarıyla takip edilebilir hâle getirir. |
+| Kontrollü hata yönetimi | Zaman aşımı, tekrar deneme, kullanıcı yönlendirmesi, iptal ve güvenli kapatma mekanizmaları sağlar. |
 
 > [!IMPORTANT]
 > Bu yazılım güç, Recovery ve hedef yazılım yükleme adımlarına doğrudan müdahale eder. Yalnızca yetkili personel tarafından, doğrulanmış UKB hedefi ve onaylı TEZI paketiyle kullanılmalıdır.
@@ -11,7 +23,7 @@ Uygulama; Moxa Power/Recovery kontrolünü, seri konsol doğrulamasını, USB-NC
 
 Kararlı sürüm: **v1.0.3**
 
-- [Uygulamayı GitHub Releases üzerinden indir](https://github.com/mdegerr/surum-yukleme/releases/tag/v1.0.3)
+- [Uygulamayı GitHub Releases üzerinden indir](https://github.com/mdegerr/ukb-software-deployment/releases/tag/v1.0.3)
 - [Sürüm notlarını incele](SURUM_NOTLARI.md)
 
 ## Projenin amacı
