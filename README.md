@@ -108,7 +108,9 @@ Sürüm deposu, platform eşlemeleri ve isteğe bağlı TEZI paket ön adı doğ
 
 ## Dağıtım ilkesi
 
-Saha kullanımı için kaynak kod klasörü değil, GitHub Release içindeki **Windows saha paketi** indirilmelidir. Paket bütünlüğü aynı Release’teki SHA256 dosyasıyla doğrulanmalıdır.
+Saha kullanımı için GitHub Release içindeki ilgili **Windows x86 ZIP paketi** indirilmelidir. Her ZIP; çalıştırılabilir Uygulama klasörünü ve mevcutsa o sürüme ait temizlenmiş Kaynak Kod klasörünü birlikte içerir. GitHub'ın Release sayfasında gösterdiği SHA-256 özeti indirme bütünlüğünü doğrulamak için kullanılabilir.
+
+Ana sayfada yalnızca güncel v1.0.3 sürümü anlatılır. USB ve v1.0.0-v1.0.2 arşivleri geriye dönük inceleme ve gerektiğinde indirme amacıyla Releases bölümünde korunur.
 
 Uygulama klasöründeki `Settings.json` bilgisayara ve platforma özel olabilir. Başka bir bilgisayara taşınırken COM, Moxa IP, slot/kanal ve USB-NCM ayarları yeniden kontrol edilmelidir.
 
