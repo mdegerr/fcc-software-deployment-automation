@@ -1,24 +1,30 @@
-SÜRÜM YÜKLEME v-1.0.0 - KLASÖR YAPISI
-=======================================
-
-Uygulama
---------
-Hedef bilgisayara götürülecek çalışır pakettir.
-Uygulamayı "Sürüm Yükleme v-1.0.0.exe" dosyasından başlatın.
-Settings.json, bilgisayara özel appsettings dosyaları, tools ve logs bu klasörde tutulur.
+SÜRÜM YÜKLEME v1.0.3 - KLASÖR YAPISI
+====================================
 
 Kaynak Kod
 ----------
-Yazılım geliştiriciler için kaynak kod, test projesi ve derleme bağımlılıklarıdır.
-Hedef bilgisayarda uygulamayı çalıştırmak için bu klasör gerekli değildir.
+Geliştiriciler için uygulama kaynakları, ortak bileşenler, test projesi,
+Easy Installer/UUU araçları ve yayın profilleri bulunur.
 
-Derleme:
-  dotnet build "Kaynak Kod\SurumYakma_Agdan\SurumYakma_Agdan.sln" -c Release
+Hedef saha bilgisayarında kaynak kod klasörüne ihtiyaç yoktur.
 
-Test:
-  dotnet run --project "Kaynak Kod\SurumYakma_Agdan\SurumYakma.Tests\SurumYakma.Tests.csproj" -c Release
+docs
+----
+Kurulum ve saha hazırlığı, mimari/iş akışı, sorun giderme rehberleri ve
+uygulama ekran görüntüleri bulunur.
 
-NOT
----
-Kaynak Kod ve Uygulama klasörlerini birbirine karıştırmayın.
-Hedef sisteme yalnızca Uygulama klasörünü kopyalamak yeterlidir.
+Uygulama
+--------
+Yerel geliştirme bilgisayarındaki doğrulanmış yayın çıktısıdır. Git tarafından
+izlenmez. Saha dağıtımı için bu klasörü elle kopyalamak yerine GitHub Releases
+bölümündeki Windows saha paketi kullanılmalıdır.
+
+GitHub Releases
+---------------
+Hedef bilgisayara taşınacak sürümlendirilmiş ZIP paketi, EXE ve SHA256
+doğrulama dosyaları burada yayımlanır.
+
+ÖNEMLİ
+------
+Gerçek yazılım paketleri, logs klasörü, Settings.json, parolalar ve bilgisayara
+özel ağ/donanım ayarları GitHub deposuna eklenmemelidir.

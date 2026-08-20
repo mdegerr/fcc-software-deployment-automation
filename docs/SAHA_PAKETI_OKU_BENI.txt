@@ -1,0 +1,18 @@
+SÜRÜM YÜKLEME v1.0.3 - SAHA PAKETİ
+==================================
+
+1. ZIP paketini yerel bir klasöre tamamen çıkarın.
+2. Uygulamayı ZIP içinden doğrudan çalıştırmayın.
+3. Sürüm Yükleme v-1.0.3.exe dosyasını yönetici olarak çalıştırın.
+4. Tera Term veya başka bir uygulamanın hedef COM portunu kullanmadığından emin olun.
+5. Windows Aygıt Yöneticisi'nde COM, OTG ve USB-NCM sürücülerini kontrol edin.
+6. Windows Defender Güvenlik Duvarında uygulamaya güvenilen saha ağı için izin verin.
+7. Bağlantı Ayarlarında hedef UKB, COM, Moxa IP, MOD ve kanal değerlerini doğrulayın.
+8. Masaüstü\UKB Sürümleri\PLATFORM klasöründe eksiksiz TEZI sürüm paketini bulundurun.
+9. Doğru UKB ve sürüm seçilmeden işlemi başlatmayın.
+10. Yükleme sırasında güç, Ethernet, seri ve OTG kablolarına gereksiz müdahale etmeyin.
+
+Bir hata oluşursa logs klasörünün tamamını, ekran görüntüsünü ve kısa test notunu saklayın.
+
+Ayrıntılı rehber:
+docs\KURULUM_VE_SAHA_HAZIRLIK.md
