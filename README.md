@@ -28,17 +28,6 @@ Stable release: **v1.0.3**
 - [Download the field package from GitHub Releases](https://github.com/mdegerr/fcc-software-deployment-automation/releases/tag/v1.0.3)
 - [View release notes](RELEASE_NOTES.md)
 
-## Operational context and terminology
-
-- **Flight Control Computer (FCC):** The target airborne computer receiving the approved software package.
-- **Aircraft Systems Integration Laboratory (SIL):** The ground-based integration environment containing real avionics, electrical interfaces, harnesses, sensors, simulation systems, and test equipment.
-- **Hardware-in-the-Loop (HIL):** The test method in which real FCC hardware interacts with simulated aircraft and sensor behavior in real time.
-- **Avionics integration bench/rig:** A smaller test setup focused on a specific avionics subsystem or integration scope.
-
-This repository uses **SIL/HIL** terminology rather than organization-specific laboratory names. “Iron Bird” is intentionally not used as a generic term because it normally refers to a larger physical test rig containing representative aircraft electrical, hydraulic, and flight-control components.
-
-Reference terminology: [NASA Research Aircraft Integration Facility](https://www.nasa.gov/directorates/armd/iasp/fdc/research-aircraft-integration-facility-capabilities/) and [NASA Flight Simulation Facilities](https://www.nasa.gov/setmo/facilities/flight-simulation-facilities/).
-
 ## Manual process replaced by the application
 
 A conventional deployment may require an operator to:
