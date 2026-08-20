@@ -71,15 +71,21 @@ Saha bilgisayarında aşağıdaki koşullar sağlanmalıdır:
 
 ## Ana ekran
 
+![Sanitized Version Installation main screen](.github/readme-assets/01-main-installation-sanitized-en.png)
+
 
 Ana ekrandan platform, sürüm ve hedef UKB seçilir. Uygulama, sürüm klasörlerini doğal sürüm sırasına göre listeler ve yüklenebilir TEZI yapısı bulunmadığında başlatma düğmesini etkinleştirmez.
 
 ## UKB bağlantı ayarları
 
+![Sanitized UKB connection settings](.github/readme-assets/02-ukb-settings-sanitized-en.png)
+
 
 Her UKB için COM, Power MOD/kanal ve Recovery MOD/kanal bilgileri ayrı tutulur. Power Box ve Relay Box IP adresleri ile ortak baud rate bu bölümden yönetilir.
 
 ## Gelişmiş seçenekler
+
+![Sanitized advanced options](.github/readme-assets/03-advanced-options-sanitized-en.png)
 
 
 Sürüm deposu, platform eşlemeleri ve isteğe bağlı TEZI paket ön adı doğrulaması bu bölümden yönetilir. Kullanıcı değişiklikleri uygulamanın `Settings.json` profilinde saklanır.
