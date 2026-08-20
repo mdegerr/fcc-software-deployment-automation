@@ -163,7 +163,7 @@
             this.RelayBoxBaglantisiLabel.Name = "RelayBoxBaglantisiLabel";
             this.RelayBoxBaglantisiLabel.Size = new System.Drawing.Size(262, 31);
             this.RelayBoxBaglantisiLabel.TabIndex = 14;
-            this.RelayBoxBaglantisiLabel.Text = "Relay Box Bağlantısı";
+            this.RelayBoxBaglantisiLabel.Text = "Relay Box Connection";
             // 
             // RelayBoxIPLabel
             // 
@@ -184,7 +184,7 @@
             this.PowerBoxBaglantisiLabel.Name = "PowerBoxBaglantisiLabel";
             this.PowerBoxBaglantisiLabel.Size = new System.Drawing.Size(269, 31);
             this.PowerBoxBaglantisiLabel.TabIndex = 16;
-            this.PowerBoxBaglantisiLabel.Text = "Power Box Bağlantısı";
+            this.PowerBoxBaglantisiLabel.Text = "Power Box Connection";
             // 
             // PowerBoxIPLabel
             // 

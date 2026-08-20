@@ -174,12 +174,66 @@ namespace SurumYakma
         {
             return WaitForMatchAsync(
                 afterSequence,
-                line => ContainsAny(line, "Toradex Easy Installer", "TEZI", "/ #") ? line : null,
+                line => IsEasyInstallerBootEvidence(line) ? line : null,
                 TimeSpan.FromSeconds(_cfg.SerialRecoveryTimeoutSeconds),
                 "Toradex Easy Installer başlangıç mesajı veya recovery promptu",
                 ct);
         }
 
+        internal static bool IsEasyInstallerBootEvidence(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+                return false;
+
+            string value = line.Trim();
+            // U-Boot FIT metadata (for example "Description: tezi-initramfs") only
+            // proves that the ramdisk is loading. It is not a Linux-ready signal.
+            return value.IndexOf("Welcome to the Toradex Easy Installer", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   value.StartsWith("Toradex Easy Installer ", StringComparison.OrdinalIgnoreCase) ||
+                   IsRootShellPrompt(value);
+        }
+
+        private static bool IsRootShellPrompt(string line)
+        {
+            string value = (line ?? string.Empty).Trim();
+            return value.Equals("/ #", StringComparison.Ordinal) ||
+                   value.Equals("#", StringComparison.Ordinal) ||
+                   value.EndsWith(":~#", StringComparison.Ordinal) ||
+                   value.EndsWith(":/#", StringComparison.Ordinal);
+        }
+
+        public async Task<bool> ProbeInteractiveShellAsync(CancellationToken ct)
+        {
+            if (!IsOpen)
+                return false;
+
+            string token = Guid.NewGuid().ToString("N");
+            string marker = "__SURUMYAKMA_SHELL_OK_" + token + "__";
+            long mark = Mark();
+            lock (_writeSync)
+                _port.Write("\n" + "echo " + marker + "\n");
+
+            Logger.Checkpoint("TEZI_SERIAL_SHELL_PROBE", "COMMAND_SENT", "timeoutSec=3");
+            try
+            {
+                await WaitForMatchAsync(
+                    mark,
+                    line => line.Trim().Equals(marker, StringComparison.Ordinal) ? marker : null,
+                    TimeSpan.FromSeconds(3),
+                    "Easy Installer etkileşimli seri kabuk doğrulaması",
+                    ct);
+                Logger.Checkpoint("TEZI_SERIAL_SHELL_PROBE", "SUCCESS");
+                return true;
+            }
+            catch (TimeoutException)
+            {
+                Logger.Checkpoint(
+                    "TEZI_SERIAL_SHELL_PROBE",
+                    "UNAVAILABLE",
+                    "action=official-zeroconf-flow; serial-cli-disabled");
+                return false;
+            }
+        }
         public Task<string> WaitForShutdownAsync(long afterSequence, CancellationToken ct)
         {
             return WaitForMatchAsync(
@@ -213,20 +267,25 @@ namespace SurumYakma
         {
             return WaitForMatchAsync(
                 afterSequence,
-                line => ContainsAny(
-                    line,
-                    "Network Up",
-                    "Network is up",
-                    "Network: Up",
-                    "Link is Up",
-                    "link becomes ready",
-                    "Reached target Network",
-                    "network online") ? line : null,
+                line => IsPhysicalEthernetLinkUpLine(line) ? line : null,
                 timeout,
-                "normal açılıştaki Network Up mesajı",
+                "normal açılıştaki fiziksel Ethernet Link Up mesajı",
                 ct);
         }
 
+        private static bool IsPhysicalEthernetLinkUpLine(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line) ||
+                line.IndexOf("Link is Up", StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            if (line.IndexOf("usb", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("can", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+
+            // Nihai Link Up sonucu yalnızca UKB'nin fiziksel eth0 portundan gelen
+            // kernel satırıyla doğrulanır. eth1 veya "link becomes ready" kabul edilmez.
+            return line.IndexOf("eth0:", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
         public Task<string> VerifyHttpHealthAsync(string healthUrl, CancellationToken ct)
         {
             if (!IsOpen)

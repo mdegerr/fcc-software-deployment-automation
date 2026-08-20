@@ -40,14 +40,30 @@ namespace SurumYakma
         private const string RecoveryScriptResourceName = "SurumYakma.Tools.Tezi.Recovery.uuu.auto";
         private const string ExpectedRecoveryToolSha256 =
             "F6B76A6246BEFABEADFEBDC1CBFE58F35939596CAF7B78717CEAB599B0C85027";
+        private const int RecoveryUsbMaximumAttempts = 3;
+        internal const int RecoveryPowerOffDwellMilliseconds = 3000;
+        internal const int RecoveryNormalSettleMilliseconds = 500;
+        internal const int RecoveryRealSetupMilliseconds = 750;
+        internal const int RecoveryPowerOnSettleMilliseconds = 1500;
+        internal const int KnownUsbWarningSeconds = 20;
+        internal const int KnownUsbRecoveryRetrySeconds = 35;
 
         private readonly AppConfig _cfg;
         private readonly MoxaController _moxa;
         private readonly VersionManager _versions;
         private readonly UkbSerialMonitor _serial;
 
+        private sealed class UsbBulkTimeoutException : Exception
+        {
+            public UsbBulkTimeoutException(string outputLine, int exitCode)
+                : base($"UUU USB bulk aktarımı zaman aşımına uğradı (çıkış kodu: {exitCode}). {outputLine}")
+            {
+            }
+        }
+
         public event Action OnWaitingForOtgConnect;
         public event Action OnWaitingForOtgDisconnect;
+        public Func<CancellationToken, Task> WaitForOtgCableConfirmationAsync { get; set; }
         public event Action OnOtgCableWaitWarning;
         public event Action<bool> OnCriticalPhaseChanged;
         public event Action OnManualRecoveryRequired;
@@ -59,6 +75,29 @@ namespace SurumYakma
             _moxa = moxa;
             _versions = versions;
             _serial = serial;
+        }
+
+        internal static async Task ExecuteRecoveryBootSequenceAsync(
+            Func<uint, CancellationToken, Task> setPower,
+            Func<uint, CancellationToken, Task> setRecovery,
+            Func<TimeSpan, CancellationToken, Task> delay,
+            Func<CancellationToken, Task> whilePoweredOff,
+            CancellationToken ct)
+        {
+            if (setPower == null) throw new ArgumentNullException(nameof(setPower));
+            if (setRecovery == null) throw new ArgumentNullException(nameof(setRecovery));
+            if (delay == null) throw new ArgumentNullException(nameof(delay));
+
+            await setPower(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOffDwellMilliseconds), ct);
+            await setRecovery(0, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryNormalSettleMilliseconds), ct);
+            if (whilePoweredOff != null)
+                await whilePoweredOff(ct);
+            await setRecovery(1, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryRealSetupMilliseconds), ct);
+            await setPower(1, ct);
+            await delay(TimeSpan.FromMilliseconds(RecoveryPowerOnSettleMilliseconds), ct);
         }
 
         public async Task RunAsync(FlashRequest req, IProgress<FlashProgress> progress, CancellationToken ct)
@@ -126,11 +165,11 @@ namespace SurumYakma
                 Report(progress, 35, $"{ukbLabel}: güç açılıyor (recovery aktif ediliyor)...");
                 await _moxa.SetPowerAsync(req.WhichUkb, 1, ct);
                 powerCommandedOn = true;
-                criticalPhase = true;
-                OnCriticalPhaseChanged?.Invoke(true);
 
                 Report(progress, 40, $"{ukbLabel}: Toradex recovery yükleyicisi çalıştırılıyor...");
                 await RunRecoveryToolAsync(progress, ukbLabel, req.WhichUkb, ct);
+                criticalPhase = true;
+                OnCriticalPhaseChanged?.Invoke(true);
 
                 Report(progress, 70, $"{ukbLabel}: UKB ağda bekleniyor...");
                 await NetworkUtils.WaitUntilReachableAsync(_cfg.UkbTargetIp, _cfg.PingTimeoutMs,
@@ -238,7 +277,7 @@ namespace SurumYakma
         {
             try
             {
-                if (powerCommandedOn && shutdownObserved)
+                if (powerCommandedOn)
                     await _moxa.SetPowerAsync(whichUkb, 0, CancellationToken.None);
             }
             catch (Exception ex)
@@ -248,7 +287,7 @@ namespace SurumYakma
 
             try
             {
-                if (recoveryEnabled && !powerCommandedOn)
+                if (recoveryEnabled)
                     await _moxa.SetRecoveryAsync(whichUkb, 0, CancellationToken.None);
             }
             catch (Exception ex)
@@ -258,6 +297,86 @@ namespace SurumYakma
         }
 
         private async Task RunRecoveryToolAsync(
+            IProgress<FlashProgress> progress,
+            string ukbLabel,
+            bool whichUkb,
+            CancellationToken ct)
+        {
+            for (int attempt = 1; attempt <= RecoveryUsbMaximumAttempts; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                try
+                {
+                    await RunRecoveryToolAttemptAsync(
+                        progress,
+                        ukbLabel,
+                        whichUkb,
+                        ct);
+                    if (attempt > 1)
+                    {
+                        Logger.Checkpoint(
+                            "USB_BULK_RETRY",
+                            "SUCCESS",
+                            $"ukb={ukbLabel}; attempt={attempt}/{RecoveryUsbMaximumAttempts}");
+                    }
+                    return;
+                }
+                catch (UsbBulkTimeoutException ex) when (!ct.IsCancellationRequested)
+                {
+                    if (attempt >= RecoveryUsbMaximumAttempts)
+                    {
+                        Logger.Checkpoint(
+                            "USB_BULK_RETRY",
+                            "FAILED",
+                            $"ukb={ukbLabel}; attempts={attempt}; message={ex.Message}");
+                        throw new InvalidOperationException(
+                            $"{ukbLabel} Easy Installer USB aktarımı {attempt} denemede de zaman aşımına uğradı. " +
+                            "OTG kablosunu doğrudan bilgisayara bağlayın; USB hub/uzatma kullanmayın. " +
+                            "Farklı bir OTG kablosu ve farklı bir USB portu, tercihen USB 2.0 deneyin.",
+                            ex);
+                    }
+
+                    int nextAttempt = attempt + 1;
+                    Logger.Checkpoint(
+                        "USB_BULK_RETRY",
+                        "START",
+                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; " +
+                        $"mode=full-power-recovery-cycle; message={ex.Message}");
+                    Report(
+                        progress,
+                        41,
+                        $"{ukbLabel}: USB aktarımı zaman aşımına uğradı; güvenli güç/recovery çevrimiyle sıfırdan yeniden deneniyor ({nextAttempt}/{RecoveryUsbMaximumAttempts})...");
+
+                    Logger.Checkpoint(
+                        "USB_BULK_RECOVERY_CYCLE",
+                        "START",
+                        $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; sequence=PowerOFF-3s-RecoveryNORMAL-500ms-RecoveryREAL-750ms-PowerON-1500ms");
+                    try
+                    {
+                        await ExecuteRecoveryBootSequenceAsync(
+                            (value, token) => _moxa.SetPowerAsync(whichUkb, value, token),
+                            (value, token) => _moxa.SetRecoveryAsync(whichUkb, value, token),
+                            (duration, token) => Task.Delay(duration, token),
+                            null,
+                            ct);
+                        Logger.Checkpoint(
+                            "USB_BULK_RECOVERY_CYCLE",
+                            "SUCCESS",
+                            $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; Power=ON; Recovery=REAL");
+                    }
+                    catch (Exception cycleEx) when (!(cycleEx is OperationCanceledException && ct.IsCancellationRequested))
+                    {
+                        Logger.Checkpoint(
+                            "USB_BULK_RECOVERY_CYCLE",
+                            "FAILED",
+                            $"ukb={ukbLabel}; nextAttempt={nextAttempt}/{RecoveryUsbMaximumAttempts}; exception={cycleEx.GetType().Name}; message={cycleEx.Message}");
+                        throw;
+                    }
+                }
+            }
+        }
+
+        private async Task RunRecoveryToolAttemptAsync(
             IProgress<FlashProgress> progress,
             string ukbLabel,
             bool whichUkb,
@@ -283,15 +402,24 @@ namespace SurumYakma
             {
                 int waitingForKnownUsb = 0;
                 long knownUsbWaitStartedUtcTicks = 0;
+                int usbBulkTimeoutDetected = 0;
+                string usbBulkTimeoutLine = null;
+
                 proc.OutputDataReceived += (sender, args) =>
                 {
                     if (!string.IsNullOrWhiteSpace(args.Data))
                     {
                         Logger.Info("[uuu] " + args.Data);
+                        if (IsUsbBulkTimeoutLine(args.Data))
+                        {
+                            usbBulkTimeoutLine = args.Data;
+                            Interlocked.Exchange(ref usbBulkTimeoutDetected, 1);
+                        }
                         UpdateKnownUsbWaitState(
                             args.Data,
                             ref waitingForKnownUsb,
                             ref knownUsbWaitStartedUtcTicks);
+
                     }
                 };
                 proc.ErrorDataReceived += (sender, args) =>
@@ -299,10 +427,16 @@ namespace SurumYakma
                     if (!string.IsNullOrWhiteSpace(args.Data))
                     {
                         Logger.Warn("[uuu] " + args.Data);
+                        if (IsUsbBulkTimeoutLine(args.Data))
+                        {
+                            usbBulkTimeoutLine = args.Data;
+                            Interlocked.Exchange(ref usbBulkTimeoutDetected, 1);
+                        }
                         UpdateKnownUsbWaitState(
                             args.Data,
                             ref waitingForKnownUsb,
                             ref knownUsbWaitStartedUtcTicks);
+
                     }
                 };
 
@@ -311,6 +445,8 @@ namespace SurumYakma
 
                 proc.BeginOutputReadLine();
                 proc.BeginErrorReadLine();
+
+
                 DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(_cfg.RecoveryBatTimeoutSeconds);
                 DateTime warningAt = DateTime.MaxValue;
                 DateTime retryAt = DateTime.MaxValue;
@@ -349,14 +485,14 @@ namespace SurumYakma
                             {
                                 observedWaitStartTicks = waitStartTicks;
                                 DateTime waitStartedAt = new DateTime(waitStartTicks, DateTimeKind.Utc);
-                                warningAt = waitStartedAt + TimeSpan.FromSeconds(10);
-                                retryAt = waitStartedAt + TimeSpan.FromSeconds(25);
+                                warningAt = waitStartedAt + TimeSpan.FromSeconds(KnownUsbWarningSeconds);
+                                retryAt = waitStartedAt + TimeSpan.FromSeconds(KnownUsbRecoveryRetrySeconds);
                                 warningSent = false;
                                 recoveryPowerCycles = 0;
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
                                     "START",
-                                    $"ukb={ukbLabel}; warningAfterSeconds=10; firstRecoveryRetryAfterSeconds=25");
+                                    $"ukb={ukbLabel}; warningAfterSeconds={KnownUsbWarningSeconds}; firstRecoveryRetryAfterSeconds={KnownUsbRecoveryRetrySeconds}");
                             }
 
                             // UUU bekleme satırı işlenirken başlangıç zamanı henüz görünür
@@ -377,8 +513,40 @@ namespace SurumYakma
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
                                     "WARNING",
-                                    $"ukb={ukbLabel}; elapsedMs={elapsedMs}; warningAfterSeconds=10");
-                                OnOtgCableWaitWarning?.Invoke();
+                                    $"ukb={ukbLabel}; elapsedMs={elapsedMs}; warningAfterSeconds={KnownUsbWarningSeconds}");
+                                if (WaitForOtgCableConfirmationAsync != null)
+                                {
+                                    Logger.Checkpoint(
+                                        "OTG_USB_BACKFEED_RECOVERY",
+                                        "START",
+                                        $"ukb={ukbLabel}; sequence=PowerOFF-3s-RecoveryNORMAL-user-replug-RecoveryREAL-PowerON");
+                                    await ExecuteRecoveryBootSequenceAsync(
+                                        (value, token) => _moxa.SetPowerAsync(whichUkb, value, token),
+                                        (value, token) => _moxa.SetRecoveryAsync(whichUkb, value, token),
+                                        (duration, token) => Task.Delay(duration, token),
+                                        async token =>
+                                        {
+                                            Logger.Checkpoint(
+                                                "OTG_USER_CONFIRMATION",
+                                                "WAIT",
+                                                $"ukb={ukbLabel}; power=OFF; recovery=NORMAL; instruction=disconnect-wait-reconnect-and-press-ok");
+                                            await WaitForOtgCableConfirmationAsync(token);
+                                            Logger.Checkpoint(
+                                                "OTG_USER_CONFIRMATION",
+                                                "SUCCESS",
+                                                $"ukb={ukbLabel}; userPressedOk=true");
+                                        },
+                                        ct);
+                                    Logger.Checkpoint(
+                                        "OTG_USB_BACKFEED_RECOVERY",
+                                        "SUCCESS",
+                                        $"ukb={ukbLabel}; Power=ON; Recovery=REAL");
+                                    retryAt = DateTime.UtcNow + TimeSpan.FromSeconds(KnownUsbRecoveryRetrySeconds);
+                                }
+                                else
+                                {
+                                    OnOtgCableWaitWarning?.Invoke();
+                                }
                             }
 
                             if (DateTime.UtcNow >= retryAt && recoveryPowerCycles < 3)
@@ -393,24 +561,27 @@ namespace SurumYakma
                                     "OTG_USB_RECOVERY_POWER_CYCLE",
                                     "START",
                                     $"ukb={ukbLabel}; attempt={recoveryPowerCycles}/3");
-                                await _moxa.SetPowerAsync(whichUkb, 0, ct);
-                                await Task.Delay(1200, ct);
-                                await _moxa.SetPowerAsync(whichUkb, 1, ct);
+                                await ExecuteRecoveryBootSequenceAsync(
+                                    (value, token) => _moxa.SetPowerAsync(whichUkb, value, token),
+                                    (value, token) => _moxa.SetRecoveryAsync(whichUkb, value, token),
+                                    (duration, token) => Task.Delay(duration, token),
+                                    null,
+                                    ct);
                                 Logger.Checkpoint(
                                     "OTG_USB_RECOVERY_POWER_CYCLE",
                                     "SUCCESS",
                                     $"ukb={ukbLabel}; attempt={recoveryPowerCycles}/3");
-                                retryAt = DateTime.UtcNow + TimeSpan.FromSeconds(25);
+                                retryAt = DateTime.UtcNow + TimeSpan.FromSeconds(KnownUsbRecoveryRetrySeconds);
                             }
                             else if (DateTime.UtcNow >= retryAt && recoveryPowerCycles >= 3)
                             {
                                 Logger.Checkpoint(
                                     "OTG_USB_DEVICE_WAIT",
                                     "FAILED",
-                                    $"ukb={ukbLabel}; recoveryPowerCycles={recoveryPowerCycles}; reason=device-never-appeared");
+                                    $"ukb={ukbLabel}; recoveryPowerCycles={recoveryPowerCycles}; reason=device-never-appeared; suspected=usb-vbus-backfeed-or-stale-host-session");
                                 throw new TimeoutException(
                                     $"{ukbLabel} OTG/USB recovery aygıtı üç otomatik güç çevriminden sonra algılanamadı. " +
-                                    "OTG kablosunu, bilgisayar USB portunu ve UKB Recovery MOD/kanal ayarını kontrol edin.");
+                                    "OTG kablosunu UKB tarafında çıkarıp en az 3 saniye bekleyin, doğrudan bilgisayara yeniden takın; bilgisayar USB portunu ve UKB Recovery MOD/kanal ayarını kontrol edin.");
                             }
                         }
 
@@ -429,7 +600,13 @@ namespace SurumYakma
 
                 proc.WaitForExit();
                 if (proc.ExitCode != 0)
+                {
+                    if (Volatile.Read(ref usbBulkTimeoutDetected) == 1)
+                        throw new UsbBulkTimeoutException(
+                            usbBulkTimeoutLine ?? "Fail Bulk(W/R): LIBUSB_ERROR_TIMEOUT (-7)",
+                            proc.ExitCode);
                     throw new InvalidOperationException("Toradex UUU aracı hata kodu döndürdü: " + proc.ExitCode);
+                }
             }
 
             Report(progress, 65, $"{ukbLabel}: recovery yükleyicisi başarıyla aktarıldı.");
@@ -444,6 +621,14 @@ namespace SurumYakma
                 await Task.Delay(settleSeconds * 1000, ct);
             Logger.Checkpoint("EASY_INSTALLER_USB_SETTLE", "SUCCESS", $"effectiveSeconds={settleSeconds}");
         }
+
+        private static bool IsUsbBulkTimeoutLine(string line)
+        {
+            return !string.IsNullOrWhiteSpace(line) &&
+                   line.IndexOf("Fail Bulk(", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                   line.IndexOf("LIBUSB_ERROR_TIMEOUT", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
 
         private static void UpdateKnownUsbWaitState(
             string line,
@@ -493,7 +678,11 @@ namespace SurumYakma
             Logger.Checkpoint("EASY_INSTALLER_LOAD", "START", "ukb=" + ukbLabel);
             try
             {
-                await RunRecoveryToolAsync(progress, ukbLabel, whichUkb, ct);
+                await RunRecoveryToolAsync(
+                    progress,
+                    ukbLabel,
+                    whichUkb,
+                    ct);
                 Logger.Checkpoint("EASY_INSTALLER_LOAD", "SUCCESS", "ukb=" + ukbLabel);
             }
             catch (Exception ex)

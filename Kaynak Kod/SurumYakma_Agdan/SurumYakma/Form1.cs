@@ -4,18 +4,29 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using MessageBox = SurumYakma.LocalizedMessageBox;
 
 namespace SurumYakma
 {
     public partial class Form1 : Form
     {
-        private const string ApplicationDisplayName = "Sürüm Yükleme v-1.0.0";
+        private const string ApplicationDisplayName = "Sürüm Yükleme v-1.0.2";
         private const int NetworkStageCount = 12;
         private const int EasyInstallerEvidenceTimeoutSeconds = 45;
+        internal const int SerialShellProbeAttempts = 3;
+        internal const int SerialShellProbeRetryDelayMilliseconds = 1500;
+        internal const int NetworkOnlyFeedDiscoveryTimeoutSeconds = 15;
+        private const int ConsoleFlushBatchSize = 800;
+        private const int ConsolePendingEntryLimit = 5000;
+        private const int ConsoleMaximumCharacters = 200000;
+        private const int ConsoleTrimToCharacters = 150000;
         private const string DefaultPlatformSuffix = " (Varsayılan)";
+        private const string EnglishDefaultPlatformSuffix = " (Default)";
 
         private AppConfig _cfg;
         private MoxaController _moxa;
@@ -47,6 +58,24 @@ namespace SurumYakma
             }
         }
 
+        private sealed class ConsoleSegment
+        {
+            public string Level { get; set; }
+            public StringBuilder Text { get; } = new StringBuilder();
+        }
+
+        private static class NativeMethods
+        {
+            internal const int WmSetRedraw = 0x000B;
+
+            [DllImport("user32.dll")]
+            internal static extern IntPtr SendMessage(
+                IntPtr hWnd,
+                int msg,
+                IntPtr wParam,
+                IntPtr lParam);
+        }
+
         private VersionChoice[] _versionChoices = new VersionChoice[0];
 
         // Tasarımcıya (resx/Designer) dokunmadan koddan eklenen kontroller:
@@ -67,6 +96,7 @@ namespace SurumYakma
         private ComboBox cmbTargetSelector;
         private readonly ConcurrentQueue<LogEntry> _pendingConsoleEntries = new ConcurrentQueue<LogEntry>();
         private System.Windows.Forms.Timer _consoleFlushTimer;
+        private int _pendingConsoleCount;
         private Panel pnlModernHeader;
         private ModernCardPanel pnlLeftCard;
         private ModernCardPanel pnlRightCard;
@@ -75,11 +105,15 @@ namespace SurumYakma
         private Label lblModernMode;
         private Button btnWorkflowTab;
         private Button btnHelpTab;
+        private Button btnLanguageTr;
+        private Button btnLanguageEn;
         private Panel pnlHelp;
         private RichTextBox txtHelpGuide;
+        private FlowLayoutPanel pnlHelpContent;
         private bool _modernUiApplied;
         private bool _compactInitialSizeApplied;
         private bool _helpViewActive;
+        private string _helpContentLanguage = "";
         private TaskCompletionSource<bool> _ukbMediaReadySource;
         private bool _ukbMediaReadyForSecondUkb;
         private bool _criticalPhase;
@@ -89,6 +123,7 @@ namespace SurumYakma
         private bool _safeOutputsReady;
         private bool _shutdownStarted;
         private bool _shutdownCompleted;
+        private bool _preservePowerAfterSuccessfulInstall;
         private string _projectName = "";
         private string _autoDetectionSummary = "";
         private int _currentNetworkStage;
@@ -180,15 +215,16 @@ namespace SurumYakma
                     bool[] targets = new[] { _cfg.SelectedUkb == 2 };
                     foreach (bool whichUkb in targets)
                     {
-                        await SetPowerAndVerifyAsync(whichUkb, 0, safeStopTimeout.Token,
-                            $"APPLICATION_SHUTDOWN_POWER_UKB{_cfg.GetTargetNumber(whichUkb)}");
+                        if (!_preservePowerAfterSuccessfulInstall)
+                            await SetPowerAndVerifyAsync(whichUkb, 0, safeStopTimeout.Token,
+                                $"APPLICATION_SHUTDOWN_POWER_UKB{_cfg.GetTargetNumber(whichUkb)}");
                         await SetRecoveryAndVerifyAsync(whichUkb, 0, safeStopTimeout.Token,
                             $"APPLICATION_SHUTDOWN_RECOVERY_UKB{_cfg.GetTargetNumber(whichUkb)}");
                     }
                     Logger.Checkpoint(
                         "APPLICATION_SHUTDOWN_SAFE_OUTPUTS",
                         "SUCCESS",
-                        $"target=UKB{_cfg.SelectedUkb}; Power=OFF; Recovery=NORMAL");
+                        $"target=UKB{_cfg.SelectedUkb}; Power={(_preservePowerAfterSuccessfulInstall ? "ON_PRESERVED" : "OFF")}; Recovery=NORMAL");
                 }
                 catch (Exception ex)
                 {
@@ -196,6 +232,8 @@ namespace SurumYakma
                     Logger.Checkpoint("APPLICATION_SHUTDOWN_SAFE_OUTPUTS", "FAILED", ex.Message);
                 }
             }
+
+            await CleanupManagedTargetRouteAsync("APPLICATION_SHUTDOWN_ROUTE");
 
             TeziMdnsAdvertiser mdns = _teziMdnsAdvertiser;
             TeziHttpServer http = _teziHttpServer;
@@ -256,13 +294,19 @@ namespace SurumYakma
             {
                 _cfg = AppConfig.Load();
                 _projectName = (Environment.GetEnvironmentVariable("UAV_PROJECT_NAME") ?? "").Trim();
-                SettingsProfileStore.TryApplyCurrentProject(
+                bool settingsProfileApplied = SettingsProfileStore.TryApplyCurrentProject(
                     _projectName,
                     _cfg,
                     out string profileLoadSummary);
                 string hardwareDetectionSummary =
-                    HardwareAutoConfigurator.ApplyStartupDetection(_cfg, _projectName);
+                    HardwareAutoConfigurator.ApplyStartupDetection(
+                        _cfg,
+                        _projectName,
+                        preserveConfiguredProfile: settingsProfileApplied);
                 _autoDetectionSummary = profileLoadSummary + " " + hardwareDetectionSummary;
+                // Hedef secimi oturumluktur; uygulama her acilista guvenli varsayilan UKB1 ile baslar.
+                ApplyStartupDefaults(_cfg);
+                Localization.SetLanguage(_cfg.UiLanguage);
             }
             catch (AppConfigException ex)
             {
@@ -298,6 +342,7 @@ namespace SurumYakma
             _serial = new UkbSerialMonitor(_cfg);
             _workflow = new FlashWorkflow(_cfg, _moxa, _versions, _serial);
             _workflow.WaitForUkbMediaReadyAsync = WaitForUkbMediaReadyAsync;
+            _workflow.WaitForOtgCableConfirmationAsync = WaitForOtgCableConfirmationAsync;
             _workflow.OnWaitingForOtgConnect += () => BeginInvoke((Action)(() =>
                 lblStatus.Text = "Flash belleği SIM PC'den güvenle çıkarın; UKB sürüm portuna ve OTG kablosunu UKB'ye takın..."));
             _workflow.OnWaitingForOtgDisconnect += () => BeginInvoke((Action)(() =>
@@ -336,6 +381,13 @@ namespace SurumYakma
             BeginInvoke((Action)(async () => await InitializeHardwareAsync()));
         }
 
+        private static void ApplyStartupDefaults(AppConfig config)
+        {
+            if (config == null)
+                return;
+            config.SelectedUkb = 1;
+            config.ValidateTeziPackageNamePrefix = false;
+        }
         private async Task InitializeHardwareAsync()
         {
             Logger.Checkpoint("HARDWARE_BACKGROUND_INIT", "START");
@@ -347,12 +399,12 @@ namespace SurumYakma
                     ProcessCleanup(_cfg.TesterName);
                 });
 
-                lblStatus.Text = "Moxa cihazlarına bağlanılıyor...";
+                lblStatus.Text = Localization.T("Moxa cihazlarına bağlanılıyor...", "Connecting to Moxa devices...");
                 _safeOutputsReady = false;
                 bool connected = await _moxa.ConnectAsync();
                 if (connected && !_cfg.HardwareTestMode)
                 {
-                    lblStatus.Text = "Başlangıç güvenliği: Power OFF ve Recovery NORMAL doğrulanıyor...";
+                    lblStatus.Text = Localization.T("Başlangıç güvenliği: Power OFF ve Recovery NORMAL doğrulanıyor...", "Startup safety: verifying Power OFF and Recovery NORMAL...");
                     await NormalizeMoxaOutputsAsync();
                 }
                 _safeOutputsReady = connected;
@@ -364,9 +416,11 @@ namespace SurumYakma
 
                 lblStatus.Text = connected
                     ? (_cfg.NetworkInstallMode
-                        ? "Yüklemeye hazır; sürümü seçip işlemi başlatın."
-                        : "Hazır.")
-                    : "Moxa bağlantısı bekleniyor; Bağlantı Ayarlarından değerleri kontrol edin.";
+                        ? Localization.T("Yüklemeye hazır; sürümü seçip işlemi başlatın.", "Ready for installation; select a version and start the operation.")
+                        : Localization.T("Hazır.", "Ready."))
+                    : Localization.T(
+                        "Moxa bağlantısı bekleniyor; Bağlantı Ayarlarından değerleri kontrol edin.",
+                        "Moxa connection is pending; check the values in Connection Settings.");
                 if (_cfg.HardwareTestMode)
                     lblStatus.Text = connected
                         ? "TEST DONANIMI HAZIR — UKB sürüm yükleme akışı devre dışı."
@@ -381,7 +435,7 @@ namespace SurumYakma
                 _safeOutputsReady = false;
                 UpdateConnectionLabels();
                 SetButtonsEnabled(false);
-                lblStatus.Text = "Donanım bağlantısı kurulamadı; ayarları kontrol edin.";
+                lblStatus.Text = Localization.T("Donanım bağlantısı kurulamadı; ayarları kontrol edin.", "Hardware connection could not be established; check the settings.");
                 Logger.Error("Arka plan donanım başlatması tamamlanamadı", ex);
                 Logger.Checkpoint("HARDWARE_BACKGROUND_INIT", "FAILED", ex.Message);
             }
@@ -478,8 +532,10 @@ namespace SurumYakma
             {
                 SetButtonsEnabled(_moxaConnected && _safeOutputsReady);
                 lblStatus.Text = _moxaConnected
-                    ? "Moxa bağlantıları hazır."
-                    : "Moxa bağlantısı bekleniyor; uygulama arka planda yeniden deneyecek.";
+                    ? Localization.T("Moxa bağlantıları hazır.", "Moxa connections are ready.")
+                    : Localization.T(
+                        "Moxa bağlantısı bekleniyor; uygulama arka planda yeniden deneyecek.",
+                        "Waiting for the Moxa connection; the application will retry in the background.");
             }
         }
 
@@ -659,9 +715,11 @@ namespace SurumYakma
                 btnWorkflowTab.Location = new Point(
                     Math.Max(305, lblModernTitle.Right + 28), 16);
                 btnHelpTab.Location = new Point(btnWorkflowTab.Right + 6, 16);
+                btnLanguageTr.Location = new Point(btnHelpTab.Right + 12, 19);
+                btnLanguageEn.Location = new Point(btnLanguageTr.Right + 4, 19);
                 btnConnectionSettings.Location = new Point(pnlModernHeader.Width - 205, 16);
                 lblConnectionSummary.Location = new Point(
-                    Math.Max(btnHelpTab.Right + 18, btnConnectionSettings.Left - 210), 17);
+                    Math.Max(btnLanguageEn.Right + 12, btnConnectionSettings.Left - 210), 17);
                 lblConnectionSummary.Size = new Size(
                     Math.Max(120, btnConnectionSettings.Left - lblConnectionSummary.Left - 14), 34);
                 lblConnectionSummary.TextAlign = ContentAlignment.MiddleRight;
@@ -990,6 +1048,22 @@ namespace SurumYakma
             };
             btnWorkflowTab.Click += (s, e) => ShowHelpView(false);
             btnHelpTab.Click += (s, e) => ShowHelpView(true);
+            btnLanguageTr = new Button
+            {
+                Text = "TR",
+                Size = new Size(42, 30),
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnLanguageEn = new Button
+            {
+                Text = "EN",
+                Size = new Size(42, 30),
+                FlatStyle = FlatStyle.Flat,
+                Cursor = Cursors.Hand
+            };
+            btnLanguageTr.Click += (s, e) => ChangeLanguage("TR");
+            btnLanguageEn.Click += (s, e) => ChangeLanguage("EN");
 
             Controls.Remove(btnConnectionSettings);
             Controls.Remove(lblConnectionSummary);
@@ -998,6 +1072,8 @@ namespace SurumYakma
             pnlModernHeader.Controls.Add(lblModernMode);
             pnlModernHeader.Controls.Add(btnWorkflowTab);
             pnlModernHeader.Controls.Add(btnHelpTab);
+            pnlModernHeader.Controls.Add(btnLanguageTr);
+            pnlModernHeader.Controls.Add(btnLanguageEn);
             pnlModernHeader.Controls.Add(lblConnectionSummary);
             pnlModernHeader.Controls.Add(btnConnectionSettings);
             Controls.Add(pnlModernHeader);
@@ -1024,6 +1100,15 @@ namespace SurumYakma
             })
                 control.Top += 58;
 
+            foreach (Control control in new Control[]
+            {
+                lblStatus, lblStageProgress, UKB1Yak, UKB2Yak
+            })
+                control.TextChanged += LocalizeDynamicControlText;
+            TextChanged += LocalizeDynamicControlText;
+            projectList.FormattingEnabled = true;
+            projectList.Format += FormatProjectListItem;
+
             foreach (Label label in new[] { label2, label1, label3, lblHello })
                 ModernUi.StyleSectionLabel(label);
             foreach (Control input in new Control[] { projectList, textBox2, surumList, driveList })
@@ -1037,6 +1122,9 @@ namespace SurumYakma
             ModernUi.StyleHeaderButton(btnConnectionSettings);
             ModernUi.StyleHeaderButton(btnWorkflowTab);
             ModernUi.StyleHeaderButton(btnHelpTab);
+            ModernUi.StyleHeaderButton(btnLanguageTr);
+            ModernUi.StyleHeaderButton(btnLanguageEn);
+            ApplyLanguage();
             UpdateHeaderTabs();
             ModernUi.StyleConnectionBadge(RelayBoxBaglantisiLabel);
             ModernUi.StyleConnectionBadge(PowerBoxBaglantisiLabel);
@@ -1089,7 +1177,7 @@ namespace SurumYakma
 
             txtHelpGuide = new RichTextBox
             {
-                Dock = DockStyle.Fill,
+                Visible = false,
                 ReadOnly = true,
                 BorderStyle = BorderStyle.None,
                 BackColor = Color.White,
@@ -1100,6 +1188,16 @@ namespace SurumYakma
                 ScrollBars = RichTextBoxScrollBars.Vertical,
                 TabStop = false
             };
+            pnlHelpContent = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoScroll = true,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                BackColor = Color.White,
+                Padding = new Padding(18, 14, 18, 24)
+            };
+            panel.Controls.Add(pnlHelpContent);
             panel.Controls.Add(txtHelpGuide);
             PopulateHelpGuide();
             return panel;
@@ -1121,7 +1219,11 @@ namespace SurumYakma
             _helpViewActive = showHelp;
             pnlHelp.Visible = showHelp;
             if (showHelp)
+            {
+                if (!string.Equals(_helpContentLanguage, Localization.LanguageCode, StringComparison.Ordinal))
+                    PopulateHelpGuide();
                 pnlHelp.BringToFront();
+            }
             pnlModernHeader.BringToFront();
             UpdateHeaderTabs();
         }
@@ -1141,11 +1243,180 @@ namespace SurumYakma
                 _helpViewActive ? Color.FromArgb(71, 85, 105) : selected;
             btnHelpTab.FlatAppearance.BorderColor =
                 _helpViewActive ? selected : Color.FromArgb(71, 85, 105);
+            if (btnLanguageTr != null && btnLanguageEn != null)
+            {
+                btnLanguageTr.BackColor = Localization.IsEnglish ? normal : selected;
+                btnLanguageEn.BackColor = Localization.IsEnglish ? selected : normal;
+                btnLanguageTr.ForeColor = Color.White;
+                btnLanguageEn.ForeColor = Color.White;
+            }
+        }
+
+        private void ChangeLanguage(string language)
+        {
+            if (_cfg == null || string.Equals(_cfg.UiLanguage, language, StringComparison.OrdinalIgnoreCase))
+                return;
+            _cfg.UiLanguage = language;
+            Localization.SetLanguage(language);
+            try
+            {
+                SettingsProfileStore.SaveCurrentProject(_projectName, _cfg);
+            }
+            catch (Exception ex)
+            {
+                Logger.Diagnostic("Dil tercihi Settings.json dosyasına kaydedilemedi.", ex);
+            }
+            ApplyLanguage();
+            RefreshProjectListLanguageSuffixes();
+            Logger.Info(Localization.T(
+                "Uygulama dili Türkçe olarak değiştirildi.",
+                "Application language changed to English."));
+        }
+
+        private void ApplyLanguage()
+        {
+            SetControlRedraw(this, false);
+            SuspendLayout();
+            try
+            {
+                Localization.Apply(this);
+                RelocalizeProcessConsole();
+                if (btnWorkflowTab != null)
+                    btnWorkflowTab.Text = Localization.T("Yükleme", "Installation");
+                if (btnHelpTab != null)
+                    btnHelpTab.Text = Localization.T("Yardım", "Help");
+                if (btnConnectionSettings != null)
+                    btnConnectionSettings.Text = Localization.T("Bağlantı Ayarları...", "Connection Settings...");
+                if (lblConsoleTitle != null)
+                    lblConsoleTitle.Text = Localization.T("İşlem Konsolu", "Process Console");
+                if (label4 != null)
+                    label4.Text = Localization.T("İlerleme", "Progress");
+                if (btnCancel != null)
+                    btnCancel.Text = Localization.T("İptal", "Cancel");
+                if (_helpViewActive && pnlHelp != null)
+                    PopulateHelpGuide();
+                UpdateHeaderTabs();
+                LayoutRuntimeControls();
+            }
+            finally
+            {
+                ResumeLayout(true);
+                SetControlRedraw(this, true);
+                Invalidate(true);
+                Update();
+            }
+        }
+
+        private void RelocalizeProcessConsole()
+        {
+            if (txtProcessConsole == null)
+                return;
+
+            FlushPendingConsoleEntries();
+            if (txtProcessConsole.TextLength == 0)
+                return;
+
+            string[] lines = txtProcessConsole.Lines;
+            var segments = new List<ConsoleSegment>();
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrEmpty(line))
+                    continue;
+                string level = line.Contains("[ERROR]", StringComparison.Ordinal) ? "ERROR" :
+                    line.Contains("[WARN]", StringComparison.Ordinal) ? "WARN" : "INFO";
+                AddConsoleSegment(
+                    segments,
+                    level,
+                    LocalizeConsoleLine(line) + Environment.NewLine);
+            }
+
+            SetControlRedraw(txtProcessConsole, false);
+            try
+            {
+                txtProcessConsole.Clear();
+                AppendConsoleSegments(segments, scrollToEnd: true);
+            }
+            finally
+            {
+                SetControlRedraw(txtProcessConsole, true);
+                txtProcessConsole.Invalidate();
+            }
+        }
+
+        private static string LocalizeConsoleLine(string line)
+        {
+            if (line.IndexOf("] [serial", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("] [uuu]", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("] [http]", StringComparison.OrdinalIgnoreCase) >= 0)
+                return line;
+            return Localization.ForCurrentLanguage(line);
+        }
+        private void LocalizeDynamicControlText(object sender, EventArgs e)
+        {
+            if (!Localization.IsEnglish || sender is not Control control)
+                return;
+            string translated = Localization.TranslateToEnglish(control.Text);
+            if (!string.Equals(control.Text, translated, StringComparison.Ordinal))
+                control.Text = translated;
+        }
+
+        private void FormatProjectListItem(object sender, ListControlConvertEventArgs e)
+        {
+            string value = Convert.ToString(e.ListItem) ?? "";
+            bool isDefault =
+                value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase) ||
+                value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase);
+            if (!isDefault)
+                return;
+            e.Value = GetProjectNameFromDisplay(value) +
+                Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
+        }
+
+        private void RefreshProjectListLanguageSuffixes()
+        {
+            if (projectList == null)
+                return;
+
+            int selectedIndex = projectList.SelectedIndex;
+            for (int index = 0; index < projectList.Items.Count; index++)
+            {
+                string value = Convert.ToString(projectList.Items[index]) ?? "";
+                bool isDefault =
+                    value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase) ||
+                    value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase);
+                if (!isDefault)
+                    continue;
+                projectList.Items[index] = GetProjectNameFromDisplay(value) +
+                    Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
+            }
+            if (selectedIndex >= 0 && selectedIndex < projectList.Items.Count)
+                projectList.SelectedIndex = selectedIndex;
+            projectList.Refresh();
         }
 
         private void PopulateHelpGuide()
         {
+            _helpContentLanguage = Localization.LanguageCode;
             txtHelpGuide.Clear();
+            if (Localization.IsEnglish)
+            {
+                AppendHelpTitle(ApplicationDisplayName + " — User Guide");
+                AppendHelpParagraph("This screen safely automates UKB version installation over USB-NCM.");
+                AppendHelpSection("1. Checks before use");
+                AppendHelpBullet("Verify UAV_PROJECT_NAME, MOXA IP/MOD/channel values and the selected UKB COM port.");
+                AppendHelpBullet("Connect the OTG cable directly; do not use a USB hub or charge-only cable.");
+                AppendHelpBullet("Allow the application through Windows Defender Firewall and ensure no serial terminal owns the COM port.");
+                AppendHelpSection("2. Connection settings");
+                AppendHelpBullet("The UKB tab contains COM, Power and Recovery mappings for UKB1–UKB6.");
+                AppendHelpBullet("The Advanced Options tab contains the editable UKB Versions root folder and environment-to-package mappings.");
+                AppendHelpSection("3. Installation");
+                AppendHelpBullet("Select the platform, version and target UKB, then start installation.");
+                AppendHelpBullet("If the OTG warning appears, connect the cable and press OK; the next recovery attempt waits for this confirmation.");
+                AppendHelpBullet("After a successful installation, Recovery remains NORMAL and UKS Power remains ON.");
+                AppendHelpBullet("LINK IS UP is shown in green when observed. If not observed, it is shown in red as a warning; the verified version remains successful.");
+                PopulateVisualHelpContent();
+                return;
+            }
             AppendHelpTitle(ApplicationDisplayName + " — Kullanım Kılavuzu");
             AppendHelpParagraph(
                 "Bu ekran, uygulamayı ilk kez kullanan personelin ağdan sürüm yükleme işlemini " +
@@ -1179,7 +1450,7 @@ namespace SurumYakma
 
             AppendHelpSection("3. Gelişmiş Seçenekler nasıl kullanılmalıdır?");
             AppendHelpBullet("Ortam adı, UAV_PROJECT_NAME değeridir. Sonunda * jokeri kullanılabilir.");
-            AppendHelpBullet("TEZI paket adı / ön eki, o ortam için sürüm klasörünün başlangıç adıdır.");
+            AppendHelpBullet("Seçilen platform klasörünün doğrudan altındaki sürüm klasörleri listelenir; klasör adları değiştirilmeden gösterilir.");
             AppendHelpCode("Örnek:  YFYK*  →  WCC     |     KSIMSEK  →  KS");
             AppendHelpBullet("Tam ortam eşlemesi, jokerli genel eşlemeden önceliklidir.");
 
@@ -1199,7 +1470,9 @@ namespace SurumYakma
             AppendHelpBullet("Ana ekrandaki Yüklenecek UKB listesinden UKB1-UKB6 arasında yalnızca bir hedef seçilir; işlem bu hedef üzerinde yürütülür.");
             AppendHelpBullet("Uygulama Recovery modunu REAL yapar, UKB gücünü açar ve Easy Installer'ı USB üzerinden yükler.");
             AppendHelpBullet("USB-NCM ağı kurulduktan sonra sürüm paketi yerel HTTP sunucusundan TEZI'ye aktarılır.");
-            AppendHelpBullet("Kurulum tamamlanınca UKB kapanışı, Recovery NORMAL durumu ve normal açılıştaki OFP sürümü doğrulanır.");
+            AppendHelpBullet("Kurulum tamamlanınca Recovery NORMAL yapılır, normal açılıştaki OFP sürümü doğrulanır ve UKS POWER açık bırakılır.");
+            AppendHelpBullet("Sonuç penceresinde LINK IS UP görülürse yeşil, görülmezse kırmızı gösterilir. Kırmızı LINK uyarısı doğrulanmış sürüm yüklemesini başarısız saymaz.");
+            AppendHelpBullet("OTG uyarısı açılırsa kabloyu bağlayıp Tamam'a basın; kullanıcı onayı verilene kadar yeni Recovery denemesi başlamaz.");
             AppendHelpBullet("İptal düğmesi veya pencereyi kapatma, aktarımı durdurur; ardından seçili UKB Power OFF ve Recovery NORMAL yapılır.");
             AppendHelpBullet("Aktarım başladıktan sonra iptal edilen sürüm eksik kalabilir ve sonraki denemede yeniden yüklenmelidir.");
 
@@ -1234,6 +1507,7 @@ namespace SurumYakma
 
             txtHelpGuide.SelectionStart = 0;
             txtHelpGuide.ScrollToCaret();
+            PopulateVisualHelpContent();
         }
 
         private void AppendHelpTitle(string text)
@@ -1289,6 +1563,286 @@ namespace SurumYakma
             txtHelpGuide.SelectionIndent = 0;
         }
 
+        private void PopulateVisualHelpContent()
+        {
+            if (pnlHelpContent == null)
+                return;
+
+            pnlHelpContent.SuspendLayout();
+            try
+            {
+                while (pnlHelpContent.Controls.Count > 0)
+                {
+                    Control control = pnlHelpContent.Controls[0];
+                    pnlHelpContent.Controls.RemoveAt(0);
+                    if (control is PictureBox picture && picture.Image != null)
+                        picture.Image.Dispose();
+                    control.Dispose();
+                }
+
+                bool english = Localization.IsEnglish;
+                AddVisualHelpTitle(
+                    english ? "Version Installation v-1.0.2 — Visual User Guide" :
+                        "Sürüm Yükleme v-1.0.2 — Görsel Kullanım Kılavuzu",
+                    english ?
+                        "Follow the checklist first. Then use the numbered screenshots to identify each field before starting installation." :
+                        "Önce kısa kontrol listesini tamamlayın. Ardından yüklemeyi başlatmadan önce numaralı görsellerden her alanın görevini kontrol edin.");
+
+                AddVisualHelpCard(
+                    english ? "Before starting — quick checklist" : "Başlamadan önce — hızlı kontrol listesi",
+                    english ? new[]
+                    {
+                        "The Platform field must show the intended UAV_PROJECT_NAME; the computer's value is marked as Default.",
+                        "Connect the OTG cable directly to the selected UKB. Do not use a USB hub or a charge-only cable.",
+                        "Verify the UKB COM port in Windows Device Manager and close Tera Term or any other serial terminal.",
+                        "Power Box and Relay Box must be reachable over Ethernet; verify their IP, MOD and channel mappings.",
+                        "Allow the application through Windows Defender Firewall for Private and Public networks.",
+                        "Verify that Desktop\\UKB Versions\\<Platform> contains the authorized complete TEZI package."
+                    } : new[]
+                    {
+                        "Platform alanında yükleme yapılacak UAV_PROJECT_NAME görülmelidir; bilgisayarın kendi değeri Varsayılan olarak işaretlenir.",
+                        "OTG kablosunu doğrudan seçilen UKB'ye bağlayın. USB hub veya yalnızca şarj kablosu kullanmayın.",
+                        "Windows Aygıt Yöneticisinde UKB COM portunu doğrulayın; Tera Term ve diğer seri terminal uygulamalarını kapatın.",
+                        "Power Box ve Relay Box Ethernet üzerinden erişilebilir olmalıdır; IP, MOD ve kanal eşlemelerini kontrol edin.",
+                        "Windows Defender Güvenlik Duvarında uygulamanın Özel ve Genel ağ izinlerini kontrol edin.",
+                        "Masaüstü\\UKB Sürümleri\\<Platform> altında yetkili ve eksiksiz TEZI paketinin bulunduğunu doğrulayın."
+                    },
+                    Color.FromArgb(236, 253, 245));
+
+                AddVisualHelpHeading(english ? "1. Main installation screen" : "1. Ana yükleme ekranı");
+                AddVisualHelpImage("SurumYakma.Assets.Help.help-main.png");
+                AddVisualHelpNumberedCard(english ? new[]
+                {
+                    "Platform: The computer environment is selected by default; change it only when installing for another registered platform.",
+                    "Version: Valid packages are sorted newest first; choose an older version only when required.",
+                    "Target UKB: Select the physical UKB whose COM, Power and Recovery mappings will be used.",
+                    "Start: Enabled only when a valid package exists and the selected hardware is ready.",
+                    "Progress: Shows the current step of the 12-stage installation workflow.",
+                    "Connections: Both Power Box Connection and Relay Box Connection must be green before starting.",
+                    "Process Console: Shows important live messages; detailed checkpoints are saved under the logs folder."
+                } : new[]
+                {
+                    "Platform: Bilgisayarın ortamı varsayılan seçilir; yalnızca kayıtlı başka bir platforma yükleme yapacaksanız değiştirin.",
+                    "Yüklenecek sürüm: Geçerli paketler en yeniden eskiye sıralanır; gerekirse eski bir sürüm seçebilirsiniz.",
+                    "Yüklenecek UKB: COM, Power ve Recovery eşlemeleri kullanılacak fiziksel UKB'yi seçin.",
+                    "Başlat düğmesi: Yalnızca geçerli paket bulunduğunda ve seçili donanım hazır olduğunda etkinleşir.",
+                    "İlerleme: 12 aşamalı yükleme akışında hangi adımda olduğunuzu gösterir.",
+                    "Bağlantılar: Başlatmadan önce Power Box Connection ve Relay Box Connection göstergeleri yeşil olmalıdır.",
+                    "İşlem Konsolu: Önemli canlı mesajları gösterir; ayrıntılı checkpoint kayıtları logs klasörüne yazılır."
+                });
+
+                AddVisualHelpHeading(english ? "2. UKB connection settings" : "2. UKB bağlantı ayarları");
+                AddVisualHelpImage("SurumYakma.Assets.Help.help-ukb-settings.png");
+                AddVisualHelpNumberedCard(english ? new[]
+                {
+                    "Power Box / Relay Box IP: Common Moxa addresses used by all UKB rows.",
+                    "Baud Rate: Common serial speed; normally 115200 unless the verified platform configuration says otherwise.",
+                    "UKB table: Each row keeps that UKB's COM, Power MOD/channel and Recovery MOD/channel together.",
+                    "USB-NCM network: UKB Target IP, HTTP Server IP and HTTP Port used by Easy Installer.",
+                    "Automatic address detection: Keep selected so the application can detect the PC USB-NCM address after Easy Installer starts.",
+                    "Save and Connect: Saves the profile and reconnects Moxa devices with the entered values."
+                } : new[]
+                {
+                    "Power Box / Relay Box IP: Tüm UKB satırları için kullanılan ortak Moxa adresleridir.",
+                    "Baud Rate: Ortak seri haberleşme hızıdır; doğrulanmış platform bilgisi farklı değilse 115200 kullanılır.",
+                    "UKB tablosu: Her UKB'nin COM, Power MOD/kanal ve Recovery MOD/kanal bilgilerini aynı satırda tutar.",
+                    "USB-NCM ağı: Easy Installer'ın kullandığı UKB hedef IP, HTTP sunucu IP ve HTTP portudur.",
+                    "Otomatik adres bulma: Easy Installer açıldıktan sonra PC USB-NCM adresinin bulunması için işaretli bırakın.",
+                    "Kaydet ve Bağlan: Profili kaydeder ve girilen değerlerle Moxa bağlantısını yeniden kurar."
+                });
+
+                AddVisualHelpHeading(english ? "3. Advanced options" : "3. Gelişmiş seçenekler");
+                AddVisualHelpImage("SurumYakma.Assets.Help.help-advanced-options.png");
+                AddVisualHelpNumberedCard(english ? new[]
+                {
+                    "UKB Versions Root Folder: Normally Desktop\\UKB Versions; platform folders are searched below it.",
+                    "Platform list: Manages the platform folders that can be selected in the application.",
+                    "Version folder: Must contain a valid TEZI package under the selected platform; package prefixes are not compared.",
+                    "Table actions: Add a row, delete checked rows, add the detected environment or load defaults.",
+                    "Save and Connect: Stores advanced options together with the active platform profile."
+                } : new[]
+                {
+                    "UKB Sürümleri ana klasörü: Normalde Masaüstü\\UKB Sürümleri yoludur; platform klasörleri bunun altında aranır.",
+                    "Platform listesi: Uygulamada seçilebilecek platform klasörlerini yönetir.",
+                    "Sürüm klasörü: Seçilen platform altında geçerli bir TEZI paketi içermelidir; paket ön adı karşılaştırılmaz.",
+                    "Tablo işlemleri: Satır ekler, işaretli satırları siler, algılanan ortamı ekler veya varsayılanları yükler.",
+                    "Kaydet ve Bağlan: Gelişmiş seçenekleri aktif platform profiliyle birlikte kaydeder."
+                });
+
+                AddVisualHelpCard(
+                    english ? "Normal installation order" : "Normal yükleme sırası",
+                    english ? new[]
+                    {
+                        "Complete the quick checklist and open Connection Settings if any value is uncertain.",
+                        "Select Platform, Version and Target UKB.",
+                        "Wait until both Moxa connection indicators are green.",
+                        "Press START VERSION INSTALLATION and follow only the popup instructions.",
+                        "If the OTG warning appears, connect the cable and press OK; the application retries automatically.",
+                        "At completion, confirm the installed OFP version and LINK result in the result window."
+                    } : new[]
+                    {
+                        "Hızlı kontrol listesini tamamlayın; emin olmadığınız değer varsa Bağlantı Ayarlarını açın.",
+                        "Platform, Yüklenecek Sürüm ve Yüklenecek UKB seçimlerini yapın.",
+                        "İki Moxa bağlantı göstergesi de yeşil olana kadar bekleyin.",
+                        "SÜRÜM YÜKLEMEYİ BAŞLAT düğmesine basın ve yalnızca açılan yönlendirmeleri uygulayın.",
+                        "OTG uyarısı çıkarsa kabloyu bağlayıp Tamam'a basın; uygulama otomatik yeniden dener.",
+                        "İşlem sonunda sonuç penceresindeki OFP sürümünü ve LINK sonucunu kontrol edin."
+                    },
+                    Color.FromArgb(239, 246, 255));
+
+                AddVisualHelpCard(
+                    english ? "Important safety notes" : "Önemli güvenlik notları",
+                    english ? new[]
+                    {
+                        "Do not change MOD/channel values without a verified platform diagram.",
+                        "Do not force-close the process from Task Manager; use Cancel or the normal close button.",
+                        "If installation fails, share the newest dated session log from the logs folder."
+                    } : new[]
+                    {
+                        "Doğrulanmış platform şeması olmadan MOD/kanal değerlerini değiştirmeyin.",
+                        "İşlemi Görev Yöneticisinden zorla kapatmayın; İptal veya normal pencere kapatma düğmesini kullanın.",
+                        "Yükleme başarısız olursa logs klasöründeki en yeni tarihli oturum logunu paylaşın."
+                    },
+                    Color.FromArgb(254, 242, 242));
+            }
+            finally
+            {
+                pnlHelpContent.ResumeLayout(true);
+                pnlHelpContent.AutoScrollPosition = Point.Empty;
+            }
+        }
+
+        private void AddVisualHelpTitle(string title, string description)
+        {
+            pnlHelpContent.Controls.Add(new Label
+            {
+                Text = title,
+                AutoSize = true,
+                MaximumSize = new Size(1120, 0),
+                Font = new Font("Segoe UI Semibold", 19F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(15, 23, 42),
+                Margin = new Padding(4, 2, 4, 8)
+            });
+            pnlHelpContent.Controls.Add(new Label
+            {
+                Text = description,
+                AutoSize = true,
+                MaximumSize = new Size(1120, 0),
+                Font = new Font("Segoe UI", 10.5F),
+                ForeColor = ModernUi.TextSecondary,
+                Margin = new Padding(4, 0, 4, 16)
+            });
+        }
+
+        private void AddVisualHelpHeading(string text)
+        {
+            pnlHelpContent.Controls.Add(new Label
+            {
+                Text = text,
+                AutoSize = true,
+                MaximumSize = new Size(1120, 0),
+                Font = new Font("Segoe UI Semibold", 14F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(20, 83, 45),
+                BackColor = Color.FromArgb(236, 253, 245),
+                Padding = new Padding(10, 7, 10, 7),
+                Margin = new Padding(4, 16, 4, 10)
+            });
+        }
+
+        private void AddVisualHelpCard(string title, string[] items, Color backColor)
+        {
+            var card = new TableLayoutPanel
+            {
+                Width = 1120,
+                AutoSize = true,
+                ColumnCount = 1,
+                BackColor = backColor,
+                Padding = new Padding(16, 13, 16, 11),
+                Margin = new Padding(4, 4, 4, 12),
+                CellBorderStyle = TableLayoutPanelCellBorderStyle.None
+            };
+            card.Controls.Add(new Label
+            {
+                Text = title,
+                AutoSize = true,
+                MaximumSize = new Size(1060, 0),
+                Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold),
+                ForeColor = ModernUi.TextPrimary,
+                Margin = new Padding(2, 0, 2, 8)
+            });
+            foreach (string item in items)
+                card.Controls.Add(new Label
+                {
+                    Text = "✓  " + item,
+                    AutoSize = true,
+                    MaximumSize = new Size(1060, 0),
+                    Font = new Font("Segoe UI", 10.2F),
+                    ForeColor = ModernUi.TextPrimary,
+                    Margin = new Padding(8, 2, 2, 7)
+                });
+            pnlHelpContent.Controls.Add(card);
+        }
+
+        private void AddVisualHelpNumberedCard(string[] items)
+        {
+            var card = new TableLayoutPanel
+            {
+                Width = 1120,
+                AutoSize = true,
+                ColumnCount = 2,
+                BackColor = Color.FromArgb(248, 250, 252),
+                Padding = new Padding(14, 12, 14, 10),
+                Margin = new Padding(4, 8, 4, 12)
+            };
+            card.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 46));
+            card.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            for (int index = 0; index < items.Length; index++)
+            {
+                var badge = new Label
+                {
+                    Text = (index + 1).ToString(),
+                    Size = new Size(30, 30),
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Font = new Font("Segoe UI Semibold", 10F, FontStyle.Bold),
+                    ForeColor = Color.White,
+                    BackColor = Color.FromArgb(37, 99, 235),
+                    Margin = new Padding(3, 3, 8, 6)
+                };
+                ModernUi.ApplyRoundedRegion(badge, 15);
+                card.Controls.Add(badge, 0, index);
+                card.Controls.Add(new Label
+                {
+                    Text = items[index],
+                    AutoSize = true,
+                    MaximumSize = new Size(1025, 0),
+                    Font = new Font("Segoe UI", 10.2F),
+                    ForeColor = ModernUi.TextPrimary,
+                    Margin = new Padding(2, 6, 2, 9)
+                }, 1, index);
+            }
+            pnlHelpContent.Controls.Add(card);
+        }
+
+        private void AddVisualHelpImage(string resourceName)
+        {
+            using Stream stream = typeof(Form1).Assembly.GetManifestResourceStream(resourceName);
+            if (stream == null)
+                return;
+            using var source = Image.FromStream(stream);
+            var image = new Bitmap(source);
+            int width = Math.Min(1120, image.Width);
+            int height = (int)Math.Round(image.Height * (width / (double)image.Width));
+            pnlHelpContent.Controls.Add(new PictureBox
+            {
+                Image = image,
+                Size = new Size(width, height),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                BackColor = Color.White,
+                BorderStyle = BorderStyle.FixedSingle,
+                Margin = new Padding(4 + Math.Max(0, (1120 - width) / 2), 2, 4, 4)
+            });
+        }
+
         private void UpdateMainActionButtonTexts()
         {
             if (_cfg == null)
@@ -1296,7 +1850,9 @@ namespace SurumYakma
 
             if (_cfg.NetworkInstallMode)
             {
-                UKB1Yak.Text = $"UKB{_cfg.SelectedUkb} — SÜRÜM YÜKLEMEYİ BAŞLAT";
+                UKB1Yak.Text = Localization.T(
+                    $"UKB{_cfg.SelectedUkb} — SÜRÜM YÜKLEMEYİ BAŞLAT",
+                    $"UKB{_cfg.SelectedUkb} — START VERSION INSTALLATION");
                 UKB2Yak.Text = "";
                 return;
             }
@@ -1453,7 +2009,7 @@ namespace SurumYakma
 
         private void InitializeConsoleFlushTimer()
         {
-            _consoleFlushTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            _consoleFlushTimer = new System.Windows.Forms.Timer { Interval = 125 };
             _consoleFlushTimer.Tick += (s, e) => FlushPendingConsoleEntries();
             _consoleFlushTimer.Start();
         }
@@ -1463,10 +2019,13 @@ namespace SurumYakma
             if (IsDisposed || !IsHandleCreated)
                 return;
 
-            // UUU ve seri port kısa sürede yüzlerce satır üretebilir. Her satır için
-            // BeginInvoke kullanmak Windows mesaj kuyruğunu doldurup pencereyi
-            // "Yanıt Vermiyor" durumuna düşürüyordu. UI, kuyruğu periyodik toplu boşaltır.
             _pendingConsoleEntries.Enqueue(entry);
+            int pending = Interlocked.Increment(ref _pendingConsoleCount);
+            while (pending > ConsolePendingEntryLimit &&
+                   _pendingConsoleEntries.TryDequeue(out _))
+            {
+                pending = Interlocked.Decrement(ref _pendingConsoleCount);
+            }
         }
 
         private void FlushPendingConsoleEntries()
@@ -1475,35 +2034,59 @@ namespace SurumYakma
                 return;
 
             int drained = 0;
-            txtProcessConsole.SuspendLayout();
+            var segments = new List<ConsoleSegment>();
+            while (drained < ConsoleFlushBatchSize &&
+                   _pendingConsoleEntries.TryDequeue(out LogEntry entry))
+            {
+                Interlocked.Decrement(ref _pendingConsoleCount);
+                string text = $"{entry.Timestamp:HH:mm:ss} [{entry.Level}] {entry.Message}" +
+                    Environment.NewLine;
+                AddConsoleSegment(segments, entry.Level, text);
+                drained++;
+            }
+
+            if (segments.Count == 0)
+                return;
+
+            SetControlRedraw(txtProcessConsole, false);
             try
             {
-                while (drained < 200 && _pendingConsoleEntries.TryDequeue(out LogEntry entry))
-                {
-                    AppendConsoleEntry(entry, scrollToEnd: false);
-                    drained++;
-                }
-
-                if (drained > 0)
-                {
-                    txtProcessConsole.SelectionStart = txtProcessConsole.TextLength;
-                    txtProcessConsole.ScrollToCaret();
-                }
+                AppendConsoleSegments(segments, scrollToEnd: true);
+                TrimProcessConsole();
             }
             finally
             {
-                txtProcessConsole.ResumeLayout();
+                SetControlRedraw(txtProcessConsole, true);
+                txtProcessConsole.Invalidate();
             }
         }
 
-
-        private void AppendConsoleEntry(LogEntry entry, bool scrollToEnd = true)
+        private static void AddConsoleSegment(
+            List<ConsoleSegment> segments,
+            string level,
+            string text)
         {
-            txtProcessConsole.SelectionStart = txtProcessConsole.TextLength;
-            txtProcessConsole.SelectionColor =
-                entry.Level == "ERROR" ? Color.LightCoral :
-                entry.Level == "WARN" ? Color.Khaki : Color.Gainsboro;
-            txtProcessConsole.AppendText($"{entry.Timestamp:HH:mm:ss} [{entry.Level}] {entry.Message}{Environment.NewLine}");
+            ConsoleSegment segment = segments.Count > 0 ? segments[segments.Count - 1] : null;
+            if (segment == null || !string.Equals(segment.Level, level, StringComparison.Ordinal))
+            {
+                segment = new ConsoleSegment { Level = level };
+                segments.Add(segment);
+            }
+            segment.Text.Append(text);
+        }
+
+        private void AppendConsoleSegments(
+            IEnumerable<ConsoleSegment> segments,
+            bool scrollToEnd)
+        {
+            foreach (ConsoleSegment segment in segments)
+            {
+                txtProcessConsole.SelectionStart = txtProcessConsole.TextLength;
+                txtProcessConsole.SelectionColor =
+                    segment.Level == "ERROR" ? Color.LightCoral :
+                    segment.Level == "WARN" ? Color.Khaki : Color.Gainsboro;
+                txtProcessConsole.AppendText(segment.Text.ToString());
+            }
             if (scrollToEnd)
             {
                 txtProcessConsole.SelectionStart = txtProcessConsole.TextLength;
@@ -1511,6 +2094,40 @@ namespace SurumYakma
             }
         }
 
+        private void TrimProcessConsole()
+        {
+            if (txtProcessConsole.TextLength <= ConsoleMaximumCharacters)
+                return;
+
+            int requestedCut = txtProcessConsole.TextLength - ConsoleTrimToCharacters;
+            int lineEnd = txtProcessConsole.Find(
+                "\n",
+                Math.Max(0, requestedCut),
+                RichTextBoxFinds.None);
+            int cut = lineEnd >= 0 ? lineEnd + 1 : requestedCut;
+            bool wasReadOnly = txtProcessConsole.ReadOnly;
+            try
+            {
+                txtProcessConsole.ReadOnly = false;
+                txtProcessConsole.Select(0, cut);
+                txtProcessConsole.SelectedText = "";
+            }
+            finally
+            {
+                txtProcessConsole.ReadOnly = wasReadOnly;
+            }
+        }
+
+        private static void SetControlRedraw(Control control, bool enabled)
+        {
+            if (control == null || control.IsDisposed || !control.IsHandleCreated)
+                return;
+            NativeMethods.SendMessage(
+                control.Handle,
+                NativeMethods.WmSetRedraw,
+                enabled ? new IntPtr(1) : IntPtr.Zero,
+                IntPtr.Zero);
+        }
 
         private void UpdateConnectionLabels()
         {
@@ -1606,7 +2223,7 @@ namespace SurumYakma
             UpdateMainActionButtonTexts();
             RefreshVersionList();
             LayoutRuntimeControls();
-            lblStatus.Text = "Yeni ayarlarla Moxa bağlantıları kuruluyor...";
+            lblStatus.Text = Localization.T("Yeni ayarlarla Moxa bağlantıları kuruluyor...", "Connecting to Moxa devices with the new settings...");
             _safeOutputsReady = false;
             _moxaConnected = await _moxa.ConnectAsync();
             if (_moxaConnected && !_cfg.HardwareTestMode)
@@ -1615,8 +2232,10 @@ namespace SurumYakma
             UpdateConnectionLabels();
             SetButtonsEnabled(_moxaConnected);
             lblStatus.Text = _moxaConnected
-                ? "Ayarlar kaydedildi ve Moxa bağlantıları kuruldu."
-                : "Ayarlar kaydedildi; Moxa bağlantısı kurulamadı. IP/slot/kanal değerlerini kontrol edin.";
+                ? Localization.T("Ayarlar kaydedildi ve Moxa bağlantıları kuruldu.", "Settings were saved and Moxa connections were established.")
+                : Localization.T(
+                    "Ayarlar kaydedildi; Moxa bağlantısı kurulamadı. IP/slot/kanal değerlerini kontrol edin.",
+                    "Settings were saved, but the Moxa connection could not be established. Check the IP, slot and channel values.");
         }
 
         private void SetButtonsEnabled(bool enabled)
@@ -1627,7 +2246,8 @@ namespace SurumYakma
                 (!string.IsNullOrWhiteSpace(_projectName) &&
                  (_cfg.NetworkInstallMode || driveList.SelectedItem != null) &&
                  surumList.Items.Count > 0 &&
-                 surumList.SelectedItem is VersionChoice);
+                 surumList.SelectedItem is VersionChoice selectedVersion &&
+                 VersionManager.IsTeziPackage(selectedVersion.Path));
             selectionsReady = selectionsReady && (_cfg == null || _cfg.HardwareTestMode ||
                 !string.IsNullOrWhiteSpace(_cfg.GetSerialPort(_cfg.SelectedUkb == 2)));
             bool flashEnabled =
@@ -1693,14 +2313,15 @@ namespace SurumYakma
                 .ThenBy(project => project, StringComparer.OrdinalIgnoreCase))
                 projectList.Items.Add(AppConfig.NormalizePlatformFolderKey(project) ==
                     AppConfig.NormalizePlatformFolderKey(environmentProject)
-                    ? project + DefaultPlatformSuffix
+                    ? project + Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix)
                     : project);
 
             string selectedDisplay = projectList.Items.Cast<string>().FirstOrDefault(project =>
                 AppConfig.NormalizePlatformFolderKey(GetProjectNameFromDisplay(project)) ==
                 AppConfig.NormalizePlatformFolderKey(preferredProject));
             if (string.IsNullOrWhiteSpace(selectedDisplay))
-                selectedDisplay = environmentProject + DefaultPlatformSuffix;
+                selectedDisplay = environmentProject +
+                    Localization.T(DefaultPlatformSuffix, EnglishDefaultPlatformSuffix);
             projectList.SelectedItem = selectedDisplay;
             _projectName = GetProjectNameFromDisplay(selectedDisplay);
             Logger.Info("Varsayılan bilgisayar platformu ortam değişkeninden okundu: " + environmentProject);
@@ -1723,7 +2344,7 @@ namespace SurumYakma
                 platformVersionsPath,
                 _projectName,
                 _cfg.ProjectPackageMappings,
-                _cfg.ValidateTeziPackageNamePrefix);
+                false);
 
             if (!_cfg.NetworkInstallMode && driveList.SelectedItem != null)
             {
@@ -1734,10 +2355,6 @@ namespace SurumYakma
 
                 var matchingFlash = flashResult.Names
                     .Select((name, index) => new { Name = name, Path = flashResult.Paths[index] })
-                    .Where(item =>
-                        VersionManager.PackageMatchesProject(item.Path, _projectName, _cfg.ProjectPackageMappings) ||
-                        (VersionManager.IsYfykProject(_projectName) &&
-                         VersionManager.TeziPackageMatchesProject(item.Path, _projectName, _cfg.ProjectPackageMappings)))
                     .ToArray();
 
                 _versionChoices = matchingFlash
@@ -1821,9 +2438,11 @@ namespace SurumYakma
         private static string GetProjectNameFromDisplay(string display)
         {
             string value = (display ?? "").Trim();
-            return value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase)
-                ? value.Substring(0, value.Length - DefaultPlatformSuffix.Length).Trim()
-                : value;
+            if (value.EndsWith(DefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase))
+                return value.Substring(0, value.Length - DefaultPlatformSuffix.Length).Trim();
+            if (value.EndsWith(EnglishDefaultPlatformSuffix, StringComparison.OrdinalIgnoreCase))
+                return value.Substring(0, value.Length - EnglishDefaultPlatformSuffix.Length).Trim();
+            return value;
         }
         private void driveList_SelectedIndexChanged(object sender, EventArgs e) => RefreshVersionList();
 
@@ -1882,24 +2501,6 @@ namespace SurumYakma
                     MessageBoxIcon.Warning);
                 return false;
             }
-            if (_cfg.ValidateTeziPackageNamePrefix &&
-                (string.IsNullOrWhiteSpace(_projectName) ||
-                !(VersionManager.PackageMatchesProject(selected.Path, _projectName, _cfg.ProjectPackageMappings) ||
-                  (VersionManager.IsYfykProject(_projectName) &&
-                   VersionManager.TeziPackageMatchesProject(selected.Path, _projectName, _cfg.ProjectPackageMappings)))))
-            {
-                Logger.Checkpoint(
-                    "NETWORK_PACKAGE_PREPARE",
-                    "FAILED",
-                    $"reason=project_mismatch; project={_projectName ?? "not-detected"}; source={selected.Path}");
-                MessageBox.Show(
-                    "Seçili paket UAV_PROJECT_NAME projesiyle eşleşmiyor.",
-                    "Proje Eşleşme Hatası",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
-                return false;
-            }
-
             UKB1Yak.Enabled = false;
             button2.Enabled = false;
             try
@@ -2094,18 +2695,44 @@ namespace SurumYakma
                     Logger.Checkpoint(
                         "TEZI_HTTP_TARGET_PORT_PROBE",
                         "START",
-                        $"candidate={candidate}; selected={selectedPort}; url={healthUrl}; timeoutSec=8");
+                        $"candidate={candidate}; selected={selectedPort}; url={healthUrl}; timeoutSec=8; accepted=http-or-mdns-query");
                     _serial.SendHttpHealthProbe(healthUrl);
-                    await WaitForNetworkStageAsync(
-                        _networkHealthRequest.Task,
-                        TimeSpan.FromSeconds(8),
-                        "UKB hedefinden HTTP health isteği alınmadı.",
-                        ct);
+
+                    Task<string> healthRequestTask = _networkHealthRequest.Task;
+                    Task mdnsEvidenceTask = mdnsQuerySeen.Task;
+                    Task probeDeadline = Task.Delay(TimeSpan.FromSeconds(8), ct);
+                    Task probeResult = await Task.WhenAny(
+                        healthRequestTask,
+                        mdnsEvidenceTask,
+                        probeDeadline);
+                    string verificationMethod;
+                    if (probeResult == healthRequestTask)
+                    {
+                        await healthRequestTask;
+                        verificationMethod = "target-http-request";
+                    }
+                    else if (probeResult == mdnsEvidenceTask)
+                    {
+                        await mdnsEvidenceTask;
+                        verificationMethod = "target-mdns-query";
+                        Logger.Checkpoint(
+                            "TEZI_HTTP_TARGET_PORT_PROBE",
+                            "FALLBACK",
+                            $"configured={_cfg.NetworkServerPort}; selected={selectedPort}; " +
+                            "reason=serial-command-not-confirmed; target-mdns-query-received; " +
+                            "HTTP content requests remain mandatory before installation");
+                    }
+                    else
+                    {
+                        ct.ThrowIfCancellationRequested();
+                        throw new TimeoutException(
+                            "UKB hedefinden HTTP health isteği veya TEZI mDNS sorgusu alınmadı.");
+                    }
 
                     Logger.Checkpoint(
                         "TEZI_HTTP_TARGET_PORT_PROBE",
                         "SUCCESS",
-                        $"configured={_cfg.NetworkServerPort}; selected={selectedPort}; url={healthUrl}");
+                        $"configured={_cfg.NetworkServerPort}; selected={selectedPort}; url={healthUrl}; method={verificationMethod}");
                     return selectedPort;
                 }
                 catch (OperationCanceledException)
@@ -2125,10 +2752,10 @@ namespace SurumYakma
 
             throw new InvalidOperationException(
                 "Easy Installer, PC HTTP sunucusuna 80/8088/8000/8888 portlarından ulaşamadı. " +
-                "USB-NCM ağı çalışıyor olabilir ancak Windows Güvenlik Duvarı uygulamanın gelen TCP bağlantısını engelliyor.",
+                "Uygulama seçili UKB'nin USB-NCM adaptörünü ve hedef rotasını doğruladı; buna rağmen erişim yoksa " +
+                "OTG sürücüsünü, Windows Güvenlik Duvarı iznini ve seçili UKB'nin COM/adaptör eşleşmesini kontrol edin.",
                 lastError);
         }
-
         private static async Task<string> WaitForEasyInstallerEvidenceAsync(
             Task<string> serialReadyTask,
             Task mdnsQueryTask,
@@ -2196,6 +2823,165 @@ namespace SurumYakma
                     $"elapsedMs={timer.ElapsedMilliseconds}; exception={ex.GetType().Name}; message={ex.Message}; {details}");
                 throw;
             }
+        }
+
+        private async Task<bool> ProbeInteractiveShellWithRetryAsync(CancellationToken ct)
+        {
+            for (int attempt = 1; attempt <= SerialShellProbeAttempts; attempt++)
+            {
+                ct.ThrowIfCancellationRequested();
+                Logger.Checkpoint(
+                    "TEZI_SERIAL_SHELL_RETRY",
+                    "START",
+                    $"attempt={attempt}/{SerialShellProbeAttempts}; port={_serial.PortName}");
+                if (await _serial.ProbeInteractiveShellAsync(ct))
+                {
+                    Logger.Checkpoint(
+                        "TEZI_SERIAL_SHELL_RETRY",
+                        "SUCCESS",
+                        $"attempt={attempt}/{SerialShellProbeAttempts}; port={_serial.PortName}");
+                    return true;
+                }
+
+                if (attempt < SerialShellProbeAttempts)
+                {
+                    Logger.Checkpoint(
+                        "TEZI_SERIAL_SHELL_RETRY",
+                        "WAITING",
+                        $"attempt={attempt}/{SerialShellProbeAttempts}; retryDelayMs={SerialShellProbeRetryDelayMilliseconds}");
+                    await Task.Delay(SerialShellProbeRetryDelayMilliseconds, ct);
+                }
+            }
+
+            Logger.Checkpoint(
+                "TEZI_SERIAL_SHELL_RETRY",
+                "UNAVAILABLE",
+                $"attempts={SerialShellProbeAttempts}; port={_serial.PortName}; action=preannounced-feed-reload");
+            return false;
+        }
+
+        private async Task<bool> TryUseExistingTeziDuringReloadAsync(
+            Task<string> feed, IProgress<FlashProgress> progress, string ukb,
+            bool whichUkb, string serverIp, CancellationToken ct)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            Task reload = _workflow.LoadEasyInstallerAsync(
+                progress, ukb, whichUkb, linked.Token);
+            if (await Task.WhenAny(reload, feed) == reload)
+            {
+                await reload;
+                return false;
+            }
+
+            await feed;
+            linked.Cancel();
+            try { await reload; }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested) { }
+            await NetworkUtils.WaitUntilReachableAsync(
+                _cfg.UkbTargetIp, _cfg.PingTimeoutMs,
+                TimeSpan.FromSeconds(_cfg.RecoveryNetworkTimeoutSeconds), ct);
+            return true;
+        }
+
+        private async Task RebindTeziServicesAsync(
+            string serverIp, TaskCompletionSource<bool> mdnsQuerySeen)
+        {
+            int port = _teziHttpServer?.Port ?? _cfg.NetworkServerPort;
+            var oldMdns = _teziMdnsAdvertiser;
+            _teziMdnsAdvertiser = null;
+            await DisposeInBackgroundAsync(oldMdns);
+            var oldHttp = _teziHttpServer;
+            _teziHttpServer = null;
+            await DisposeInBackgroundAsync(oldHttp);
+            _networkFeedRequest = NewNetworkRequestSource();
+            _networkImageRequest = NewNetworkRequestSource();
+            _networkPayloadRequest = NewNetworkRequestSource();
+            _teziHttpServer = TeziHttpServer.StartWithFallback(
+                serverIp, port, _networkStagingPath);
+            _teziHttpServer.RequestStarted += TeziHttpServer_RequestStarted;
+            _teziHttpServer.RequestCompleted += TeziHttpServer_RequestCompleted;
+            _teziMdnsAdvertiser = new TeziMdnsAdvertiser(
+                serverIp, _teziHttpServer.Port);
+            _teziMdnsAdvertiser.RelevantQueryReceived += () =>
+                mdnsQuerySeen.TrySetResult(true);
+            _teziMdnsAdvertiser.Start();
+        }
+
+        private async Task ReloadEasyInstallerWithPublishedFeedAsync(
+            bool whichUkb,
+            string ukbLabel,
+            int selectedTargetNumber,
+            string expectedServerIp,
+            Task<string> observedFeedRequest,
+            TaskCompletionSource<bool> mdnsQuerySeen,
+            IProgress<FlashProgress> progress,
+            CancellationToken ct)
+        {
+            Logger.Checkpoint(
+                "NETWORK_TEZI_PREANNOUNCED_RELOAD",
+                "START",
+                $"ukb={ukbLabel}; server={expectedServerIp}; policy=http-mdns-active-before-full-easy-installer-reload");
+            lblStatus.Text = "Easy Installer ağ kaynağı hazır tutularak yeniden başlatılıyor...";
+
+            await SetPowerAndVerifyAsync(
+                whichUkb,
+                0,
+                ct,
+                "NETWORK_TEZI_RELOAD_POWER_OFF");
+            await Task.Delay(FlashWorkflow.RecoveryPowerOffDwellMilliseconds, ct);
+
+            await SetRecoveryAndVerifyAsync(
+                whichUkb,
+                0,
+                ct,
+                "NETWORK_TEZI_RELOAD_RECOVERY_NORMAL");
+            await Task.Delay(FlashWorkflow.RecoveryNormalSettleMilliseconds, ct);
+
+            HashSet<string> beforeReload = HardwareAutoConfigurator.GetNetworkInterfaceIds();
+
+            await SetRecoveryAndVerifyAsync(
+                whichUkb,
+                1,
+                ct,
+                "NETWORK_TEZI_RELOAD_RECOVERY_REAL");
+            await Task.Delay(FlashWorkflow.RecoveryRealSetupMilliseconds, ct);
+
+            await SetPowerAndVerifyAsync(
+                whichUkb,
+                1,
+                ct,
+                "NETWORK_TEZI_RELOAD_POWER_ON");
+
+            if (await TryUseExistingTeziDuringReloadAsync(
+                    observedFeedRequest, progress, ukbLabel, whichUkb, expectedServerIp, ct))
+                return;
+
+            string reboundServerIp = await HardwareAutoConfigurator.EnsureNetworkServerIpAsync(
+                _cfg,
+                beforeReload,
+                selectedTargetNumber,
+                TimeSpan.FromSeconds(_cfg.RecoveryNetworkTimeoutSeconds),
+                ct);
+            if (!string.Equals(reboundServerIp, expectedServerIp, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidOperationException(
+                    $"Easy Installer yeniden yüklemesinden sonra USB-NCM PC adresi değişti. " +
+                    $"Beklenen={expectedServerIp}; bulunan={reboundServerIp}.");
+            }
+
+            await NetworkUtils.WaitUntilReachableAsync(
+                _cfg.UkbTargetIp,
+                _cfg.PingTimeoutMs,
+                TimeSpan.FromSeconds(_cfg.RecoveryNetworkTimeoutSeconds),
+                ct);
+
+            await RebindTeziServicesAsync(reboundServerIp, mdnsQuerySeen);
+
+            Logger.Checkpoint(
+                "NETWORK_TEZI_PREANNOUNCED_RELOAD",
+                "SUCCESS",
+                $"ukb={ukbLabel}; target={_cfg.UkbTargetIp}; server={reboundServerIp}; " +
+                "httpAndMdnsRemainedActive=true");
         }
 
         private async Task<string> WaitForTeziFeedWithRefreshAsync(
@@ -2270,6 +3056,7 @@ namespace SurumYakma
                 $"staging={_networkStagingPath}; expectedOfp={_networkExpectedOfpVersion}; project={_projectName}");
 
             _cts = new CancellationTokenSource();
+            _preservePowerAfterSuccessfulInstall = false;
             string ukbLabel = "UKB" + _cfg.GetTargetNumber(whichUkb);
             UKB1Yak.Enabled = false;
             btnCancel.Enabled = true;
@@ -2279,12 +3066,13 @@ namespace SurumYakma
             bool shutdownObserved = false;
             bool installationSuccessful = false;
             bool retainForManualRecovery = false;
+            bool serialShellAvailable = false;
             string observedOfpVersion = null;
             string observedNetworkUpLine = null;
             string activeServerIp = null;
             int activeServerPort = 0;
             TaskCompletionSource<bool> mdnsQuerySeen = null;
-            HashSet<string> interfacesBeforeEasyInstaller = HardwareAutoConfigurator.GetNetworkInterfaceIds();
+            HashSet<string> interfacesBeforeEasyInstaller = null;
             string currentStage = "NETWORK_INSTALL_INITIALIZE";
             var progress = new Progress<FlashProgress>(p =>
             {
@@ -2322,6 +3110,16 @@ namespace SurumYakma
                         }
                     });
 
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_POWER_OFF_DWELL",
+                    "START",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryPowerOffDwellMilliseconds}");
+                await Task.Delay(FlashWorkflow.RecoveryPowerOffDwellMilliseconds, _cts.Token);
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_POWER_OFF_DWELL",
+                    "SUCCESS",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryPowerOffDwellMilliseconds}");
+
                 lblStatus.Text = "Recovery başlangıç durumu NORMAL yapılıyor...";
                 currentStage = "NETWORK_PREFLIGHT_RECOVERY_NORMALIZE";
                 await RunLoggedStageAsync(
@@ -2333,6 +3131,24 @@ namespace SurumYakma
                         _cts.Token,
                         "NETWORK_PREFLIGHT_RECOVERY_NORMALIZE"));
 
+                // Seçili UKB Power OFF ve Recovery NORMAL olduktan sonra başlangıç
+                // listesini al. Diğer UKB'lerden açık kalan adaptörler böylece eski,
+                // seçili UKB açıldığında etkinleşen adaptör ise yeni olarak ayrılır.
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_NORMAL_SETUP",
+                    "START",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryNormalSettleMilliseconds}");
+                await Task.Delay(FlashWorkflow.RecoveryNormalSettleMilliseconds, _cts.Token);
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_NORMAL_SETUP",
+                    "SUCCESS",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryNormalSettleMilliseconds}");
+                interfacesBeforeEasyInstaller = HardwareAutoConfigurator.GetNetworkInterfaceIds();
+                Logger.Checkpoint(
+                    "USB_NCM_BASELINE",
+                    "CAPTURED",
+                    $"ukb={ukbLabel}; activeCount={interfacesBeforeEasyInstaller.Count}; " +
+                    "policy=after-selected-power-off-before-recovery-power-on");
                 long recoveryMark = _serial.Mark();
                 SetNetworkStage(3, "Recovery Modu ve UKB Gücü Hazırlanıyor");
                 lblStatus.Text = "Recovery modu REAL yapılıyor...";
@@ -2343,30 +3159,58 @@ namespace SurumYakma
                     () => SetRecoveryAndVerifyAsync(whichUkb, 1, _cts.Token, "NETWORK_RECOVERY_REAL"));
                 recoveryEnabled = true;
 
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_REAL_SETUP",
+                    "START",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryRealSetupMilliseconds}");
+                await Task.Delay(FlashWorkflow.RecoveryRealSetupMilliseconds, _cts.Token);
+                Logger.Checkpoint(
+                    "NETWORK_RECOVERY_REAL_SETUP",
+                    "SUCCESS",
+                    $"ukb={ukbLabel}; durationMs={FlashWorkflow.RecoveryRealSetupMilliseconds}");
+
                 lblStatus.Text = "UKB gücü açılıyor...";
                 currentStage = "NETWORK_POWER_ON_RECOVERY";
+                powerOn = true;
                 await RunLoggedStageAsync(
                     currentStage,
-                    $"ukb={ukbLabel}; requested=ON",
+                    $"ukb={ukbLabel}; requested=ON; startupOrder=power-on-and-uuu-overlap",
                     () => SetPowerAndVerifyAsync(
                         whichUkb,
                         1,
                         _cts.Token,
                         "NETWORK_POWER_ON_RECOVERY"));
-                powerOn = true;
+
                 _criticalPhase = false;
                 btnCancel.Enabled = true;
 
                 SetNetworkStage(4, "Easy Installer USB Üzerinden Yükleniyor");
-                lblStatus.Text = "Toradex Easy Installer USB üzerinden yükleniyor; OTG kablosu bekleniyor...";
+                lblStatus.Text = "Toradex Easy Installer USB üzerinden yükleniyor; OTG aygıtı bekleniyor...";
                 currentStage = "NETWORK_EASY_INSTALLER_LOAD";
                 await RunLoggedStageAsync(
                     currentStage,
-                    $"ukb={ukbLabel}",
-                    () => _workflow.LoadEasyInstallerAsync(progress, ukbLabel, whichUkb, _cts.Token));
+                    $"ukb={ukbLabel}; startupOrder=power-on-and-uuu-overlap",
+                    () => _workflow.LoadEasyInstallerAsync(
+                        progress,
+                        ukbLabel,
+                        whichUkb,
+                        _cts.Token));
 
                 SetNetworkStage(5, "USB-NCM Sanal Ağ Bağlantısı Oluşturuluyor");
-                lblStatus.Text = "Hedef yükleme ortamı bekleniyor...";
+                lblStatus.Text = "Seçili UKB USB-NCM adaptörü hazırlanıyor...";
+                currentStage = "NETWORK_USB_NCM_CONFIGURE";
+                int selectedTargetNumber = _cfg.GetTargetNumber(whichUkb);
+                activeServerIp = await RunLoggedStageAsync(
+                    currentStage,
+                    $"target={_cfg.UkbTargetIp}; ukb={ukbLabel}; auto={_cfg.AutoDetectNetworkServerIp}",
+                    () => HardwareAutoConfigurator.EnsureNetworkServerIpAsync(
+                        _cfg,
+                        interfacesBeforeEasyInstaller,
+                        selectedTargetNumber,
+                        TimeSpan.FromSeconds(_cfg.RecoveryNetworkTimeoutSeconds),
+                        _cts.Token));
+
+                lblStatus.Text = "Hedef yükleme ortamı doğrulanıyor...";
                 currentStage = "NETWORK_USB_NCM_TARGET_REACHABLE";
                 await RunLoggedStageAsync(
                     currentStage,
@@ -2378,29 +3222,23 @@ namespace SurumYakma
                         _cts.Token));
 
                 SetNetworkStage(6, "Yerel Sürüm Sunucusu Başlatılıyor");
-                lblStatus.Text = "Hedef PC adresi otomatik belirleniyor...";
+                lblStatus.Text = "Yerel sürüm sunucusu seçili USB-NCM adresinde başlatılıyor...";
                 currentStage = "NETWORK_HTTP_SERVER_START";
-                activeServerIp = await RunLoggedStageAsync(
+                await RunLoggedStageAsync(
                     currentStage,
-                    $"target={_cfg.UkbTargetIp}; configuredPort={_cfg.NetworkServerPort}; auto={_cfg.AutoDetectNetworkServerIp}",
+                    $"target={_cfg.UkbTargetIp}; server={activeServerIp}; configuredPort={_cfg.NetworkServerPort}; auto={_cfg.AutoDetectNetworkServerIp}",
                     async () =>
                     {
-                        string resolvedServerIp = await HardwareAutoConfigurator.EnsureNetworkServerIpAsync(
-                            _cfg,
-                            interfacesBeforeEasyInstaller,
-                            TimeSpan.FromSeconds(15),
-                            _cts.Token);
                         TeziHttpServer previousServer = _teziHttpServer;
                         _teziHttpServer = null;
                         await DisposeInBackgroundAsync(previousServer);
                         _teziHttpServer = TeziHttpServer.StartWithFallback(
-                            resolvedServerIp,
+                            activeServerIp,
                             _cfg.NetworkServerPort,
                             _networkStagingPath);
                         _teziHttpServer.RequestStarted += TeziHttpServer_RequestStarted;
                         _teziHttpServer.RequestCompleted += TeziHttpServer_RequestCompleted;
                         activeServerPort = _teziHttpServer.Port;
-                        return resolvedServerIp;
                     });
                 Logger.Checkpoint(
                     "USB_NCM_SERVER_ADDRESS",
@@ -2469,20 +3307,51 @@ namespace SurumYakma
                 bool easyInstallerVerifiedByMdns =
                     easyInstallerEvidence.StartsWith("MDNS:", StringComparison.Ordinal);
                 bool selectedSerialProducedData = _serial.HasReceivedDataSince(recoveryMark);
+                if (selectedSerialProducedData)
+                    serialShellAvailable = await ProbeInteractiveShellWithRetryAsync(_cts.Token);
+
+                if (!serialShellAvailable && !mdnsQuerySeen.Task.IsCompleted)
+                {
+                    currentStage = "NETWORK_EASY_INSTALLER_MDNS_READY";
+                    await RunLoggedStageAsync(
+                        currentStage,
+                        "service=_tezi._tcp.local; timeoutSec=20; reason=serial-shell-unavailable",
+                        async () =>
+                        {
+                            Task deadline = Task.Delay(TimeSpan.FromSeconds(20), _cts.Token);
+                            Task completed = await Task.WhenAny(mdnsQuerySeen.Task, deadline);
+                            if (completed != mdnsQuerySeen.Task)
+                            {
+                                _cts.Token.ThrowIfCancellationRequested();
+                                throw new TimeoutException(
+                                    "Easy Installer açıldı ancak 20 saniye içinde _tezi._tcp Zeroconf sorgusu göndermedi. " +
+                                    "USB-NCM adaptörünü, Windows güvenlik duvarındaki UDP 5353 iznini ve seçili UKB ağ eşlemesini kontrol edin.");
+                            }
+                            await mdnsQuerySeen.Task;
+                        });
+                    easyInstallerVerifiedByMdns = true;
+                }
+                // The mDNS query can arrive while the three-second shell probe is running.
+                // Re-read the task state so that a valid Zeroconf signal is never lost.
+                easyInstallerVerifiedByMdns =
+                    easyInstallerVerifiedByMdns || mdnsQuerySeen.Task.IsCompleted;
                 Logger.Checkpoint(
                     "NETWORK_EASY_INSTALLER_READY",
                     "SUCCESS",
-                    "method=" + (easyInstallerVerifiedByMdns ? "mdns-query" : "serial") +
-                    "; evidence=" + easyInstallerEvidence);
+                    "method=" + (serialShellAvailable ? "serial-shell" : "official-zeroconf") +
+                    "; bootEvidence=" + easyInstallerEvidence +
+                    "; mdnsQuery=" + mdnsQuerySeen.Task.IsCompleted +
+                    "; serialShell=" + serialShellAvailable);
                 Logger.Checkpoint(
                     "SERIAL_PORT_GUARD",
-                    selectedSerialProducedData ? "READY" : "WARNING",
+                    serialShellAvailable ? "READY" : "NETWORK_ONLY",
                     $"selected={_serial.PortName}; dataReceived={selectedSerialProducedData}; " +
-                    "action=" + (selectedSerialProducedData ? "none" : "network-flow-continues; validate-before-serial-fallback"));
+                    "shell=" + serialShellAvailable + "; action=" +
+                    (serialShellAvailable ? "serial-cli-fast-path-enabled" : "serial-cli-disabled; official-zeroconf-flow"));
                 Logger.Info("Ağ testi için Easy Installer hazır: " + easyInstallerEvidence);
 
                 SetNetworkStage(8, "UKB ile PC Ağ Erişimi Test Ediliyor");
-                if (selectedSerialProducedData)
+                if (serialShellAvailable)
                 {
                     lblStatus.Text = "Easy Installer → PC için erişilebilir HTTP portu otomatik belirleniyor...";
                     currentStage = "NETWORK_REVERSE_HTTP_PORT_SELECTION";
@@ -2528,7 +3397,7 @@ namespace SurumYakma
                 lblStatus.Text = "Easy Installer'ın sürüm listesini istemesi bekleniyor...";
                 currentStage = "NETWORK_TEZI_FEED_REQUEST_ATTEMPT_1";
                 string feedRequest = null;
-                if (selectedSerialProducedData)
+                if (serialShellAvailable)
                 {
                     try
                     {
@@ -2567,11 +3436,12 @@ namespace SurumYakma
                     {
                         feedRequest = await RunLoggedStageAsync(
                             currentStage,
-                            "expectedPath=/image_list.json; timeoutSec=30; method=mdns-vnc-refresh",
+                            $"expectedPath=/image_list.json; timeoutSec={(serialShellAvailable ? 30 : NetworkOnlyFeedDiscoveryTimeoutSeconds)}; method=mdns-vnc-refresh",
                             () => WaitForTeziFeedWithRefreshAsync(
                                 _networkFeedRequest.Task,
                                 mdnsQuerySeen.Task,
-                                TimeSpan.FromSeconds(30),
+                                TimeSpan.FromSeconds(
+                                    serialShellAvailable ? 30 : NetworkOnlyFeedDiscoveryTimeoutSeconds),
                                 "Easy Installer CLI ve mDNS/VNC denemelerinden sonra image_list.json istemedi.",
                                 "FALLBACK",
                                 _cts.Token));
@@ -2595,35 +3465,89 @@ namespace SurumYakma
                             retryMdnsQuerySeen.TrySetResult(true);
                         _teziMdnsAdvertiser.Start();
 
-                        currentStage = "NETWORK_TEZI_UI_RESTART_FOR_RESCAN";
-                        try
+                        if (serialShellAvailable)
                         {
+                            currentStage = "NETWORK_TEZI_UI_RESTART_FOR_RESCAN";
+                            try
+                            {
+                                await RunLoggedStageAsync(
+                                    currentStage,
+                                    "reason=late_zeroconf_feed; payloadStarted=false",
+                                    () => _serial.RestartTeziUiAsync(_cts.Token));
+                            }
+                            catch (Exception restartEx) when (!(restartEx is OperationCanceledException && _cts.IsCancellationRequested))
+                            {
+                                Logger.Checkpoint(
+                                    "NETWORK_TEZI_UI_RESTART_FALLBACK",
+                                    "CONTINUE",
+                                    $"exception={restartEx.GetType().Name}; message={restartEx.Message}");
+                            }
+                        }
+                        else
+                        {
+                            currentStage = "NETWORK_TEZI_PREANNOUNCED_RELOAD";
                             await RunLoggedStageAsync(
                                 currentStage,
-                                "reason=late_zeroconf_feed; payloadStarted=false",
-                                () => _serial.RestartTeziUiAsync(_cts.Token));
-                        }
-                        catch (Exception restartEx) when (!(restartEx is OperationCanceledException && _cts.IsCancellationRequested))
-                        {
+                                $"ukb={ukbLabel}; server={activeServerIp}; reason=serial-shell-unavailable-and-refresh-timeout",
+                                () => ReloadEasyInstallerWithPublishedFeedAsync(
+                                    whichUkb,
+                                    ukbLabel,
+                                    selectedTargetNumber,
+                                    activeServerIp,
+                                    _networkFeedRequest.Task,
+                                    mdnsQuerySeen,
+                                    progress,
+                                    _cts.Token));
                             Logger.Checkpoint(
-                                "NETWORK_TEZI_UI_RESTART_FALLBACK",
-                                "CONTINUE",
-                                $"exception={restartEx.GetType().Name}; message={restartEx.Message}");
+                                "NETWORK_TEZI_UI_RESTART_FOR_RESCAN",
+                                "SUCCESS",
+                                "reason=serial-shell-unavailable; action=full-easy-installer-reload-with-http-mdns-active");
                         }
 
-                        currentStage = "NETWORK_TEZI_FEED_REQUEST_ATTEMPT_2";
-                        feedRequest = await RunLoggedStageAsync(
-                            currentStage,
-                            "expectedPath=/image_list.json; timeoutSec=30; attempt=2/2",
-                            () => WaitForTeziFeedWithRefreshAsync(
-                                _networkFeedRequest.Task,
-                                mdnsQuerySeen.Task,
-                                TimeSpan.FromSeconds(30),
-                                "Easy Installer tüm otomatik feed yöntemlerinden sonra image_list.json istemedi. " +
-                                "Hedef TEZI teşhisi otomatik olarak loga alınacak.",
-                                "ATTEMPT_2",
-                                _cts.Token));
-                        Logger.Checkpoint("NETWORK_TEZI_FEED_RECOVERY", "SUCCESS", "method=restart; attempt=2/2");
+                        if (feedRequest == null && _networkFeedRequest.Task.IsCompleted)
+                            feedRequest = await _networkFeedRequest.Task;
+
+                        if (feedRequest == null && !serialShellAvailable)
+                            serialShellAvailable = await ProbeInteractiveShellWithRetryAsync(_cts.Token);
+
+                        if (feedRequest == null && serialShellAvailable)
+                        {
+                            string recoveredFeedUrl = _teziHttpServer.BaseUrl + "/image_list.json";
+                            currentStage = "NETWORK_TEZICTL_FEED_ADD_AFTER_RELOAD";
+                            await RunLoggedStageAsync(
+                                currentStage,
+                                "url=" + recoveredFeedUrl,
+                                () => _serial.AddTeziFeedAsync(recoveredFeedUrl, _cts.Token));
+                            currentStage = "NETWORK_TEZICTL_FEED_REQUEST_AFTER_RELOAD";
+                            feedRequest = await RunLoggedStageAsync(
+                                currentStage,
+                                "expectedPath=/image_list.json; timeoutSec=15",
+                                () => WaitForNetworkStageAsync(
+                                    _networkFeedRequest.Task,
+                                    TimeSpan.FromSeconds(15),
+                                    "Easy Installer yeniden yüklemesinden sonra TEZI CLI image_list.json istemedi.",
+                                    _cts.Token));
+                        }
+
+                        if (feedRequest == null)
+                        {
+                            currentStage = "NETWORK_TEZI_FEED_REQUEST_ATTEMPT_2";
+                            feedRequest = await RunLoggedStageAsync(
+                                currentStage,
+                                "expectedPath=/image_list.json; timeoutSec=30; attempt=2/2",
+                                () => WaitForTeziFeedWithRefreshAsync(
+                                    _networkFeedRequest.Task,
+                                    mdnsQuerySeen.Task,
+                                    TimeSpan.FromSeconds(30),
+                                    "Easy Installer tüm otomatik feed yöntemlerinden sonra image_list.json istemedi. " +
+                                    "Hedef TEZI teşhisi otomatik olarak loga alınacak.",
+                                    "ATTEMPT_2",
+                                    _cts.Token));
+                        }
+                        Logger.Checkpoint(
+                            "NETWORK_TEZI_FEED_RECOVERY",
+                            "SUCCESS",
+                            "method=restart; attempt=2/2; serialShellAfterReload=" + serialShellAvailable);
                     }
                 }
                 Logger.Checkpoint("TEZI_FEED_DISCOVERY", "SUCCESS", "path=" + feedRequest);
@@ -2658,6 +3582,13 @@ namespace SurumYakma
                 }
                 catch (TimeoutException)
                 {
+                    if (!serialShellAvailable)
+                    {
+                        throw new TimeoutException(
+                            "Easy Installer paketi ve image.json dosyasını aldı ancak autoinstall başlamadı. " +
+                            "Bu Easy Installer oturumunda etkileşimli seri kabuk bulunmadığı için desteklenmeyen CLI komutu gönderilmedi. " +
+                            "Paketin autoinstall=true olduğunu ve lisans alanının ağ staging kopyasında kaldırıldığını kontrol edin.");
+                    }
                     currentStage = "NETWORK_TEZICTL_IMAGE_INSTALL";
                     await RunLoggedStageAsync(
                         currentStage,
@@ -2824,19 +3755,13 @@ namespace SurumYakma
                         ex.Message);
                 }
 
-                lblStatus.Text = "Sürüm doğrulandı; UKB gücü kapatılıyor...";
-                currentStage = "NETWORK_FINAL_POWER_OFF";
-                await RunLoggedStageAsync(
-                    currentStage,
-                    $"ukb={ukbLabel}; requested=OFF",
-                    () => SetPowerAndVerifyAsync(
-                        whichUkb,
-                        0,
-                        _cts.Token,
-                        "NETWORK_FINAL_POWER_OFF"));
-                powerOn = false;
-
                 installationSuccessful = true;
+                _preservePowerAfterSuccessfulInstall = true;
+                currentStage = "NETWORK_FINAL_POWER_PRESERVED";
+                Logger.Checkpoint(
+                    currentStage,
+                    "SUCCESS",
+                    $"ukb={ukbLabel}; Power=ON; Recovery=NORMAL; reason=post-install-operational-state");
                 CompleteNetworkProgress();
                 Logger.Checkpoint(
                     "NETWORK_INSTALL",
@@ -2845,13 +3770,13 @@ namespace SurumYakma
                 string networkResult = FormatNetworkVerificationResult(observedNetworkUpLine);
                 lblStatus.Text =
                     "SÜRÜM YÜKLENDİ VE DOĞRULANDI — " + networkResult +
-                    "; UKB kapalı, Recovery NORMAL.";
+                    "; UKS POWER açık, Recovery NORMAL.";
                 UKB1Yak.Text = "SÜRÜM YÜKLEME TAMAMLANDI";
-                MessageBox.Show(
+                ShowInstallResultDialog(
                     "Bağlantı testleri geçti, sürüm ağ üzerinden yüklendi ve normal açılıştaki OFP sürümü doğrulandı.\n\n" +
                     $"OFP Version: {observedOfpVersion}\n" +
                     $"Ağ durumu: {networkResult}\n\n" +
-                    "UKB kapalı ve Recovery NORMAL durumda bırakıldı.",
+                    "UKS POWER açık ve Recovery NORMAL durumda bırakıldı.",
                     "Sürüm Yükleme Başarılı",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);
@@ -2884,7 +3809,7 @@ namespace SurumYakma
                 // Paket aktarimi baslamadan onceki Easy Installer kesif hatalarinda,
                 // hedefteki TEZI gunlugunu seri porttan otomatik olarak oturum loguna al.
                 // Bu salt-okunur teshis, guvenli geri alma islemlerinden once yapilmalidir.
-                if (!payloadObserved && powerOn && _serial.IsOpen)
+                if (!payloadObserved && powerOn && _serial.IsOpen && serialShellAvailable)
                 {
                     try
                     {
@@ -2950,8 +3875,9 @@ namespace SurumYakma
             {
                 _criticalPhase = false;
                 await StopNetworkServicesAsync();
+                await CleanupManagedTargetRouteAsync("NETWORK_INSTALL_ROUTE_CLEANUP");
 
-                if (!retainForManualRecovery && powerOn)
+                if (!retainForManualRecovery && powerOn && !installationSuccessful)
                 {
                     try
                     {
@@ -3009,7 +3935,7 @@ namespace SurumYakma
                 btnCancel.Enabled = false;
                 _cts?.Dispose();
                 _cts = null;
-                if (installationSuccessful && !powerOn && !recoveryEnabled)
+                if (installationSuccessful && powerOn && !recoveryEnabled)
                 {
                     UnlockNetworkUiAfterSuccessfulRun();
                 }
@@ -3030,13 +3956,72 @@ namespace SurumYakma
             }
         }
 
-        private static bool IsPhysicalEthernetLinkUp(string line)
+        private void ShowInstallResultDialog(
+            string message,
+            string caption,
+            MessageBoxButtons buttons,
+            MessageBoxIcon icon)
         {
-            return !string.IsNullOrWhiteSpace(line) &&
-                   line.IndexOf("Link is Up", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                   line.IndexOf("usb", StringComparison.OrdinalIgnoreCase) < 0;
+            bool linkUp = message.IndexOf("LINK UP", StringComparison.OrdinalIgnoreCase) >= 0;
+            using var dialog = new Form
+            {
+                Text = Localization.ForCurrentLanguage(caption),
+                StartPosition = FormStartPosition.CenterParent,
+                FormBorderStyle = FormBorderStyle.FixedDialog,
+                MaximizeBox = false,
+                MinimizeBox = false,
+                ShowInTaskbar = false,
+                ClientSize = new Size(600, 285),
+                BackColor = Color.White,
+                Font = new Font("Segoe UI", 10F)
+            };
+            var body = new Label
+            {
+                AutoSize = false,
+                Location = new Point(24, 22),
+                Size = new Size(552, 150),
+                Text = Localization.ForCurrentLanguage(message),
+                ForeColor = ModernUi.TextPrimary
+            };
+            var linkBadge = new Label
+            {
+                AutoSize = false,
+                Location = new Point(24, 180),
+                Size = new Size(552, 42),
+                TextAlign = ContentAlignment.MiddleCenter,
+                Font = new Font("Segoe UI Semibold", 12F, FontStyle.Bold),
+                Text = linkUp
+                    ? "LINK IS UP"
+                    : Localization.T("LINK IS UP GÖZLENMEDİ", "LINK IS UP NOT OBSERVED"),
+                ForeColor = linkUp ? Color.FromArgb(22, 101, 52) : Color.FromArgb(185, 28, 28),
+                BackColor = linkUp ? Color.FromArgb(220, 252, 231) : Color.FromArgb(254, 226, 226)
+            };
+            var ok = new Button
+            {
+                Text = Localization.T("Tamam", "OK"),
+                DialogResult = DialogResult.OK,
+                Size = new Size(105, 36),
+                Location = new Point(471, 237)
+            };
+            ModernUi.StylePrimaryButton(ok);
+            dialog.Controls.Add(body);
+            dialog.Controls.Add(linkBadge);
+            dialog.Controls.Add(ok);
+            dialog.AcceptButton = ok;
+            dialog.CancelButton = ok;
+            dialog.ShowDialog(this);
         }
 
+        private static bool IsPhysicalEthernetLinkUp(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line) ||
+                line.IndexOf("Link is Up", StringComparison.OrdinalIgnoreCase) < 0)
+                return false;
+            if (line.IndexOf("usb", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                line.IndexOf("can", StringComparison.OrdinalIgnoreCase) >= 0)
+                return false;
+            return line.IndexOf("eth0:", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
         private static string FormatNetworkVerificationResult(string line)
         {
             if (IsPhysicalEthernetLinkUp(line))
@@ -3103,6 +4088,28 @@ namespace SurumYakma
                 DisposeInBackgroundAsync(http));
         }
 
+        private async Task CleanupManagedTargetRouteAsync(string checkpoint)
+        {
+            if (_cfg == null || string.IsNullOrWhiteSpace(_cfg.UkbTargetIp))
+                return;
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            try
+            {
+                await HardwareAutoConfigurator.CleanupManagedTargetRoutesAsync(
+                    _cfg.UkbTargetIp,
+                    timeout.Token);
+                Logger.Checkpoint(checkpoint, "SUCCESS", "target=" + _cfg.UkbTargetIp);
+            }
+            catch (Exception ex)
+            {
+                Logger.Diagnostic("Geçici USB-NCM hedef rotası temizlenemedi.", ex);
+                Logger.Checkpoint(
+                    checkpoint,
+                    "FAILED",
+                    $"target={_cfg.UkbTargetIp}; exception={ex.GetType().Name}; message={ex.Message}");
+            }
+        }
         private static Task DisposeInBackgroundAsync(IDisposable resource)
         {
             if (resource == null)
@@ -3190,6 +4197,38 @@ namespace SurumYakma
             return true;
         }
 
+        private Task WaitForOtgCableConfirmationAsync(CancellationToken ct)
+        {
+            var source = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            void ShowConfirmation()
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    source.TrySetCanceled(ct);
+                    return;
+                }
+                MessageBox.Show(
+                    this,
+                    Localization.T(
+                        "OTG aygıtı algılanamadı. UKB gücü kapatıldı ve Recovery NORMAL yapıldı. OTG kablosunu UKB tarafından çıkarın, en az 3 saniye bekleyin, doğrudan PC ile UKB arasına yeniden takın ve ardından Tamam'a basın.",
+                        "The OTG device was not detected. UKB power is now OFF and Recovery is NORMAL. Disconnect the OTG cable from the UKB, wait at least 3 seconds, reconnect it directly between the PC and UKB, and then press OK."),
+                    Localization.T(
+                        "OTG Kablosunu Yeniden Takın",
+                        "Reconnect the OTG Cable"),
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                source.TrySetResult(true);
+            }
+
+            if (InvokeRequired)
+                BeginInvoke((Action)ShowConfirmation);
+            else
+                ShowConfirmation();
+            ct.Register(() => source.TrySetCanceled(ct));
+            return source.Task;
+        }
+
         private async Task WaitForUkbMediaReadyAsync(string ukbLabel, CancellationToken ct)
         {
             if (InvokeRequired)
@@ -3257,21 +4296,15 @@ namespace SurumYakma
             }
 
             VersionChoice selectedVersion = surumList.SelectedItem as VersionChoice;
-            if (selectedVersion == null ||
-                (_cfg.ValidateTeziPackageNamePrefix &&
-                (string.IsNullOrWhiteSpace(_projectName) ||
-                !(VersionManager.PackageMatchesProject(selectedVersion.Path, _projectName, _cfg.ProjectPackageMappings) ||
-                  (VersionManager.IsYfykProject(_projectName) &&
-                   VersionManager.TeziPackageMatchesProject(selectedVersion.Path, _projectName, _cfg.ProjectPackageMappings))))))
+            if (selectedVersion == null)
             {
                 MessageBox.Show(
-                    "Seçili sürüm bilgisayarın UAV_PROJECT_NAME projesiyle eşleşmiyor. İşlem başlatılmadı.",
-                    "Proje Eşleşme Hatası",
+                    "Yüklenebilir bir sürüm klasörü seçin.",
+                    "Geçersiz Sürüm",
                     MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                    MessageBoxIcon.Warning);
                 return;
             }
-
             if (!VersionManager.IsTeziPackage(selectedVersion.Path))
             {
                 MessageBox.Show(

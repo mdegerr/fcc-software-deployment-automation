@@ -10,6 +10,7 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -18,8 +19,15 @@ using SurumYakma;
 internal static class Program
 {
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
+        if (args.Length == 2 &&
+            args[0].Equals("--capture-docs", StringComparison.OrdinalIgnoreCase))
+            return CaptureEnglishDocumentationScreenshots(args[1]);
+        if (args.Length == 2 &&
+            args[0].Equals("--capture-help-preview", StringComparison.OrdinalIgnoreCase))
+            return CaptureHelpPreview(args[1]);
+
         string testRoot = Path.Combine(Path.GetTempPath(), "SurumYakmaTests-" + Guid.NewGuid().ToString("N"));
         try
         {
@@ -43,20 +51,42 @@ internal static class Program
             Console.WriteLine("PASS: Şimşek otomatik MOXA slot/kanal profili");
             RunAdvancedSettingsTest();
             Console.WriteLine("PASS: gelismis ayarlar ve ortam-paket eslemesi");
+            RunLocalizationAndFinalStateTest(testRoot);
+            Console.WriteLine("PASS: TR/EN, OTG onayi, LINK sonucu ve basarili son durum korumalari");
             RunSwarmUavConfigurationTest(testRoot);
             Console.WriteLine("PASS: SURU IHA alti UKB hedef paneli ve secili hedef cozumleme");
-            RunTeziPrefixToggleTest(testRoot);
-            Console.WriteLine("PASS: istege bagli TEZI on ad dogrulamasi ve profil kaydi");
+            RunSixTargetUsbNcmAddressTest();
+            Console.WriteLine("PASS: UKB1-UKB6 benzersiz USB-NCM PC adresleri ve sınır doğrulaması");
+            RunStaleUsbNcmAdapterRejectionTest();
+            Console.WriteLine("PASS: USB-NCM yalnızca yeni veya aynı hedef IP sahibinden seçiliyor");
+            RunFolderBasedTeziDiscoveryTest(testRoot);
+            Console.WriteLine("PASS: klasor tabanli surum kesfi ve TEZI yapi dogrulamasi");
+            RunStartupDefaultsTest();
+            Console.WriteLine("PASS: her uygulama acilisinda UKB1 varsayilani ve kapali on-ad kontrolu");
+            RunRecoveryBootSequenceTest();
+            Console.WriteLine("PASS: OTG geri besleme korumali recovery boot sirasi ve zamanlamasi");
             RunOtgWaitStateParsingTest();
             Console.WriteLine("PASS: OTG bekleme ve yeniden baglanma durum algilama");
+            RunTeziFeedRecoveryPolicyTest();
+            Console.WriteLine("PASS: seri kabuk gecikmesi ve onceden duyurulan feed ile Easy Installer yeniden yukleme politikasi");
+            RunUsbBulkTimeoutParsingTest();
+            Console.WriteLine("PASS: UUU USB bulk timeout hatasi secici yeniden deneme algilama");
             RunRecoveryToolSelfHealTest(testRoot);
             Console.WriteLine("PASS: bundled recovery araclari atomik restore ve hash dogrulamasi");
             RunModernUiSmokeTest(true);
             Console.WriteLine("PASS: modern ağdan aktarım arayüzü yerleşim kontrolü");
+            RunConsoleResponsivenessPolicyTest();
+            Console.WriteLine("PASS: yüksek hacimli konsol kuyruğu, toplu çizim ve bellek sınırı");
+            RunEnglishUiSmokeTest();
+            Console.WriteLine("PASS: ana ekran dinamik Ingilizce metin ve Default platform gorunumu");
             RunSingleTargetUiSmokeTest();
             Console.WriteLine("PASS: UKB1/UKB2 tekli hedef seçimi ve seçili COM özeti");
             RunTeziHttpServerTest(testRoot);
             Console.WriteLine("PASS: TEZI HTTP health, feed, dosya ve range aktarımı");
+            RunSequentialNetworkLifecycleTest(testRoot);
+            Console.WriteLine("PASS: sıralı UKB oturumlarında HTTP portu ve istek durumları temizleniyor");
+            RunTwoEnvironmentMultiUkbInstallSimulation(testRoot);
+            Console.WriteLine("PASS: iki platformda UKB1-UKB6 sıralı Easy Installer aktarım simülasyonu");
             RunNetworkPackagePreparationTest(testRoot);
             Console.WriteLine("PASS: ağ staging kopyası, kaynak koruma ve autoinstall hazırlığı");
             RunTeziMdnsPacketTest();
@@ -76,8 +106,162 @@ internal static class Program
         }
         finally
         {
+            Logger.Shutdown();
             if (Directory.Exists(testRoot))
                 Directory.Delete(testRoot, true);
+        }
+    }
+
+    private static int CaptureEnglishDocumentationScreenshots(string outputDirectory)
+    {
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+            Localization.SetLanguage("EN");
+            var config = new AppConfig
+            {
+                NetworkInstallMode = true,
+                SelectedUkb = 1,
+                UiLanguage = "EN",
+                SerialPortName = "COM22",
+                PowerBoxIp = "10.135.1.60",
+                RelayBoxIp = "10.135.1.40",
+                NetworkServerPort = 8088,
+                VersionsRootPath = @"C:\Users\Operator\Desktop\UKB Versions"
+            };
+            config.MigrateLegacyTargetsToUnifiedTable();
+
+            using (var form = new Form1())
+            {
+                // Form1_Load gerçek makine ayarlarını yükler. Dokümantasyon görseli
+                // yalnızca aşağıdaki örnek EN yapılandırmasıyla hazırlanır.
+                Localization.SetLanguage("EN");
+                Type type = typeof(Form1);
+                MethodInfo loadMethod = type.GetMethod(
+                    "Form1_Load",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+                form.Load -= (EventHandler)Delegate.CreateDelegate(
+                    typeof(EventHandler),
+                    form,
+                    loadMethod);
+                type.GetField("_cfg", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .SetValue(form, config);
+                type.GetField("_projectName", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .SetValue(form, "KSIMSEK");
+                type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("ConfigureProductionUi", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+
+                var projects = (ComboBox)type.GetField("projectList", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(form);
+                projects.Items.Clear();
+                projects.Items.Add("KSIMSEK (Varsayılan)");
+                projects.SelectedIndex = 0;
+                var status = (Label)type.GetField("lblStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .GetValue(form);
+                status.Text = "Ready. Select a version package to start installation.";
+                type.GetMethod("UpdateMainActionButtonTexts", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("ApplyLanguage", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                type.GetMethod("RefreshProjectListLanguageSuffixes", BindingFlags.Instance | BindingFlags.NonPublic)
+                    .Invoke(form, null);
+                CaptureForm(form, Path.Combine(outputDirectory, "01-main-installation-en.png"));
+            }
+
+            Localization.SetLanguage("EN");
+            Type dialogType = typeof(AppConfig).Assembly.GetType(
+                "SurumYakma.ConnectionSettingsForm",
+                throwOnError: true);
+            using (var dialog = (Form)Activator.CreateInstance(
+                dialogType,
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+                binder: null,
+                args: new object[] { config, "KSIMSEK", false },
+                culture: null))
+            {
+                TabControl tabs = Descendants(dialog).OfType<TabControl>().Single();
+                tabs.SelectedIndex = 0;
+                CaptureForm(dialog, Path.Combine(outputDirectory, "02-ukb-settings-en.png"));
+                tabs.SelectedIndex = 1;
+                CaptureForm(dialog, Path.Combine(outputDirectory, "03-advanced-options-en.png"));
+            }
+            Localization.SetLanguage("TR");
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Screenshot generation failed: " + ex);
+            return 1;
+        }
+    }
+
+    private static void CaptureForm(Form form, string outputPath)
+    {
+        form.StartPosition = FormStartPosition.Manual;
+        form.Location = new Point(-20000, -20000);
+        form.Show();
+        Application.DoEvents();
+        using var bitmap = new Bitmap(form.Width, form.Height);
+        form.DrawToBitmap(bitmap, new Rectangle(Point.Empty, bitmap.Size));
+        bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+        form.Hide();
+    }
+
+    private static int CaptureHelpPreview(string outputPath)
+    {
+        try
+        {
+            Localization.SetLanguage("TR");
+            var config = new AppConfig
+            {
+                NetworkInstallMode = true,
+                SelectedUkb = 1,
+                UiLanguage = "TR",
+                SerialPortName = "COM22"
+            };
+            config.MigrateLegacyTargetsToUnifiedTable();
+            using var form = new Form1();
+            Type type = typeof(Form1);
+            MethodInfo loadMethod = type.GetMethod(
+                "Form1_Load",
+                BindingFlags.Instance | BindingFlags.NonPublic);
+            form.Load -= (EventHandler)Delegate.CreateDelegate(
+                typeof(EventHandler),
+                form,
+                loadMethod);
+            type.GetField("_cfg", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(form, config);
+            type.GetField("_projectName", BindingFlags.Instance | BindingFlags.NonPublic)
+                .SetValue(form, "KSIMSEK");
+            type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(form, null);
+            type.GetMethod("ConfigureProductionUi", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(form, null);
+            form.StartPosition = FormStartPosition.Manual;
+            form.Location = new Point(20, 20);
+            form.Show();
+            Application.DoEvents();
+            type.GetMethod("ShowHelpView", BindingFlags.Instance | BindingFlags.NonPublic)
+                .Invoke(form, new object[] { true });
+            Application.DoEvents();
+            using (var bitmap = new Bitmap(form.Width, form.Height))
+            {
+                using Graphics graphics = Graphics.FromImage(bitmap);
+                graphics.CopyFromScreen(
+                    form.PointToScreen(Point.Empty),
+                    Point.Empty,
+                    bitmap.Size);
+                bitmap.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
+            }
+            form.Hide();
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Help preview generation failed: " + ex);
+            return 1;
         }
     }
 
@@ -103,7 +287,9 @@ internal static class Program
             NetworkServerIp = "192.168.11.221",
             NetworkServerPort = 8088,
             AutoDetectNetworkServerIp = true,
-            ValidateTeziPackageNamePrefix = false
+            ValidateTeziPackageNamePrefix = false,
+            UiLanguage = "EN",
+            VersionsRootPath = Path.Combine(testRoot, "UKB Versions")
         };
 
         SettingsProfileStore.Save(settingsPath, "YFYK 8.1", config);
@@ -119,33 +305,206 @@ internal static class Program
         Assert(updated.Contains("\"ComPort\": \"COM27\""), "Manuel COM ayari profile yazilmadi.");
         Assert(updated.Contains("\"IPAddress\": \"10.10.1.60\""), "Power Box IP profile yazilmadi.");
         Assert(updated.Contains("\"IPAddress\": \"10.10.1.40\""), "Relay Box IP profile yazilmadi.");
+        Assert(updated.Contains("\"UiLanguage\": \"EN\""), "Arayuz dili profile yazilmadi.");
+        Assert(updated.Contains("\"VersionsRootPath\""), "Surum deposu yolu profile yazilmadi.");
     }
 
-    private static void RunTeziPrefixToggleTest(string testRoot)
+    private static void RunLocalizationAndFinalStateTest(string testRoot)
     {
-        string repository = Path.Combine(testRoot, "prefix-toggle");
-        string package = CreateTeziPackage(
-            repository,
-            "kiha-Tezi_6.6.0-devel-20260701120000+build.0",
-            "KIHA 11.0.16.1.0");
+        Localization.SetLanguage("EN");
+        Assert(Localization.T("Türkçe", "English") == "English",
+            "Ingilizce arayuz secimi uygulanmadi.");
+        Assert(Localization.TranslateToEnglish("Uygulama başladı.") == "Application started.",
+            "Log mesaji Ingilizceye cevrilemedi.");
+        Assert(Localization.TranslateToEnglish("Moxa cihazlarına bağlanılıyor...") ==
+               "Connecting to Moxa devices...",
+            "Moxa durum metni tam Ingilizceye cevrilemedi.");
+        Assert(!Localization.TranslateToEnglish("Moxa cihazlarına bağlanılıyor...")
+                   .Contains("bnetwork", StringComparison.OrdinalIgnoreCase),
+            "Kisa kelime cevirisi Turkce kelimenin icini bozdu.");        Assert(Localization.TranslateToEnglish(
+                   "Moxa bağlantısı bekleniyor; uygulama arka planda yeniden deneyecek.") ==
+               "Waiting for the Moxa connection; the application will retry in the background." &&
+               Localization.TranslateToEnglish(
+                   "Ayarlar kaydedildi; Moxa bağlantısı kurulamadı. IP/slot/kanal değerlerini kontrol edin.") ==
+               "Settings were saved, but the Moxa connection could not be established. Check the IP, slot and channel values.",
+            "Power/Relay kutularinin altindaki durum metinleri tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish(
+                   "OTG kablo bağlantısı algılanamadı. OTG kablosunu doğrudan PC ile UKB arasına takın ve bağlantıyı kontrol edin.\n\n" +
+                   "Tamam'a bastıktan sonra uygulama Recovery güç çevrimi yaparak USB aygıtını otomatik olarak tekrar arayacaktır.") ==
+               "The OTG cable connection was not detected. Connect the OTG cable directly between the PC and UKB and check the connection.\n\n" +
+               "After you press OK, the application will perform a Recovery power cycle and automatically search for the USB device again." &&
+               Localization.TranslateToEnglish(
+                   "Bağlantı testleri geçti, sürüm ağ üzerinden yüklendi ve normal açılıştaki OFP sürümü doğrulandı.") ==
+               "Connection tests passed, the version was installed over the network, and the OFP version was verified after normal boot.",
+            "OTG veya basarili kurulum popup metni tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish("1. Yüklenecek Sürüm") ==
+               "1. Version to Install" &&
+               Localization.TranslateToEnglish("2. Yüklenecek UKB") ==
+               "2. Target UKB" &&
+               Localization.TranslateToEnglish("3. Yükleme İşlemi") ==
+               "3. Installation",
+            "Ana ekran basliklari tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish("Bağlantı ve Donanım Ayarları") ==
+               "Connection and Hardware Settings",
+            "Baglanti penceresi basligi tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish(
+                   "Sürüm yükleme başlatılamadı. Başarısız aşama: NETWORK_TEST") ==
+               "Version installation could not be started. Failed stage: NETWORK_TEST",
+            "Hata popup metni tamamen Ingilizce degil.");
+        Assert(Localization.TranslateToEnglish("Uygulama Zaten Açık") ==
+               "Application Already Running" &&
+               Localization.TranslateToEnglish("OTG Kablosunu Takın") ==
+               "Connect the OTG Cable" &&
+               Localization.TranslateToEnglish("Sürüm Yükleme Başarılı") ==
+               "Version Installation Successful",
+            "Popup basliklarinin Ingilizce karsiliklari eksik.");
 
-        Assert(VersionManager.GetTeziPackagePaths(repository, "TUK").Length == 0,
-            "Acik on ad dogrulamasi farkli platform paketini kabul etti.");
-        Assert(VersionManager.GetTeziPackagePaths(repository, "TUK", null, false).Single() == package,
-            "Kapali on ad dogrulamasi gecerli TEZI yapisini kabul etmedi.");
+        var config = new AppConfig
+        {
+            UiLanguage = "EN",
+            VersionsRootPath = Path.Combine(testRoot, "custom-version-root")
+        };
+        Assert(config.GetVersionsRootPath() == config.VersionsRootPath,
+            "Manuel surum deposu yolu kullanilmadi.");
 
-        string settingsPath = Path.Combine(testRoot, "prefix-toggle-Settings.json");
-        File.WriteAllText(settingsPath, "{}");
-        var source = new AppConfig { ValidateTeziPackageNamePrefix = false };
-        SettingsProfileStore.Save(settingsPath, "TUK", source);
-        string savedProfile = File.ReadAllText(settingsPath);
-        Assert(savedProfile.Contains(nameof(AppConfig.ValidateTeziPackageNamePrefix)) &&
-               savedProfile.Contains("false"),
-            "TEZI on ad secenegi Settings.json profiline yazilmadi.");
+        PropertyInfo otgConfirmation = typeof(FlashWorkflow).GetProperty(
+            "WaitForOtgCableConfirmationAsync",
+            BindingFlags.Instance | BindingFlags.Public);
+        Assert(otgConfirmation?.PropertyType == typeof(Func<CancellationToken, Task>),
+            "OTG kullanici onayi bekleme noktasi bulunamadi.");
+
+        MethodInfo linkCheck = typeof(Form1).GetMethod(
+            "IsPhysicalEthernetLinkUp",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(linkCheck != null &&
+               (bool)linkCheck.Invoke(null, new object[] { "eth0: Link is Up - 1Gbps/Full" }) &&
+               !(bool)linkCheck.Invoke(null, new object[] { "eth1: Link is Up - 1Gbps/Full" }) &&
+               !(bool)linkCheck.Invoke(null, new object[] { "usb0: Link is Up" }),
+            "Fiziksel eth0 LINK IS UP ayrimi dogru calismiyor.");
+
+        MethodInfo serialLinkCheck = typeof(UkbSerialMonitor).GetMethod(
+            "IsPhysicalEthernetLinkUpLine",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(serialLinkCheck != null &&
+               (bool)serialLinkCheck.Invoke(null, new object[] { "fec 30be0000.ethernet eth0: Link is Up - 1Gbps/Full - flow control off" }) &&
+               !(bool)serialLinkCheck.Invoke(null, new object[] { "imx-dwmac ethernet eth1: Link is Up - 1Gbps/Full" }) &&
+               !(bool)serialLinkCheck.Invoke(null, new object[] { "eth0: link becomes ready" }) &&
+               !(bool)serialLinkCheck.Invoke(null, new object[] { "usb0: Link is Up" }) &&
+               !(bool)serialLinkCheck.Invoke(null, new object[] { "can0: link becomes ready" }),
+            "Seri izleme eth0 disindaki satiri fiziksel Ethernet Link Up olarak kabul ediyor.");
+        FieldInfo preservePower = typeof(Form1).GetField(
+            "_preservePowerAfterSuccessfulInstall",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo resultDialog = typeof(Form1).GetMethod(
+            "ShowInstallResultDialog",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(preservePower?.FieldType == typeof(bool) && resultDialog != null,
+            "Basarili kurulumda Power ON veya renkli LINK sonuc korumasi eksik.");
+
+        Type dialogType = typeof(AppConfig).Assembly.GetType(
+            "SurumYakma.ConnectionSettingsForm",
+            throwOnError: true);
+        using (var dialog = (Form)Activator.CreateInstance(
+            dialogType,
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic,
+            binder: null,
+            args: new object[] { config, "KSIMSEK", false },
+            culture: null))
+        {
+            Assert(dialog.Text == "Connection and Hardware Settings",
+                "Baglanti penceresi Ingilizce baslikla acilmadi.");
+            string[] texts = Descendants(dialog).Select(control => control.Text).ToArray();
+            Assert(texts.Contains("Advanced Options") &&
+                   texts.Contains("Automatically detect the USB-NCM PC address after Easy Installer starts") &&
+                   texts.Contains("Platform List") &&
+                   !texts.Contains("Validate the TEZI package prefix against the environment") &&
+                   !texts.Contains("TEZI Package Name / Prefix"),
+                "Baglanti/Gelismis ayarlarda Ingilizceye cevrilmemis kontroller var.");
+        }
+        Assert(Localization.TranslateToEnglish(
+                   "Moxa bağlantısı bekleniyor; Bağlantı Ayarlarından değerleri kontrol edin.") ==
+               "Moxa connection is pending; check the values in Connection Settings." &&
+               Localization.TranslateToEnglish(
+                   "Ayarlar kaydedildi; Moxa bağlantısı kurulamadı. IP/slot/kanal değerlerini kontrol edin.") ==
+               "Settings were saved, but the Moxa connection could not be established. Check the IP, slot and channel values.",
+            "Power/Relay kutularinin altindaki dinamik Moxa durumlari tam Ingilizceye cevrilmedi.");
+        Localization.SetLanguage("TR");
+        Assert(Localization.ForCurrentLanguage("Power Box Connection") ==
+               "Power Box Connection" &&
+               Localization.ForCurrentLanguage("Relay Box Connection") ==
+               "Relay Box Connection",
+            "Teknik Power/Relay kutu adlari Turkce arayuzde degistirildi.");
+        Assert(Localization.TranslateToTurkish("Operation not started") ==
+               "İşlem başlatılmadı",
+            "Dinamik durum metni Turkceye geri cevrilemedi.");
+        Assert(Localization.TranslateToTurkish(
+                   "Moxa connection is pending; check the values in Connection Settings.") ==
+               "Moxa bağlantısı bekleniyor; Bağlantı Ayarlarından değerleri kontrol edin.",
+            "Moxa bekleme metni Turkceye geri cevrilemedi.");
+        Assert(Localization.TranslateToTurkish(
+                   "08:56:05 [INFO] Application language changed to English.") ==
+               "08:56:05 [INFO] Uygulama dili Türkçe olarak değiştirildi.",
+            "Konsoldaki onceki Ingilizce dil mesaji Turkceye geri cevrilemedi.");
+        using (var root = new Panel())
+        using (var status = new Label { Text = "Operation not started" })
+        using (var grid = new DataGridView())
+        {
+            grid.Columns.Add("Target", "Target");
+            root.Controls.Add(status);
+            root.Controls.Add(grid);
+            Localization.Apply(root);
+            Assert(status.Text == "İşlem başlatılmadı" &&
+                   grid.Columns[0].HeaderText == "Hedef",
+                "TR seciminde kontrol veya tablo basligi Ingilizce kaldi.");
+        }
     }
 
+    private static void RunFolderBasedTeziDiscoveryTest(string testRoot)
+    {
+        string repository = Path.Combine(testRoot, "folder-based-discovery", "KIHA");
+        string versionFolder = Path.Combine(repository, "UKB 20.11.2");
+        string package = CreateTeziPackage(
+            versionFolder,
+            "unrelated-Tezi_6.6.0-devel-20260701120000+build.0",
+            "UNRELATED 11.0.16.1.0");
+        Directory.CreateDirectory(Path.Combine(repository, "UKB 19.4.7 - eksik"));
+
+        VersionListResult versions = VersionManager.GetSelectableTeziVersions(
+            repository,
+            "KIHA",
+            new[]
+            {
+                new ProjectPackageMapping
+                {
+                    EnvironmentName = "KIHA",
+                    PackageNamePrefix = "KIHA"
+                }
+            },
+            true);
+
+        Assert(versions.Names.SequenceEqual(new[] { "UKB 20.11.2", "UKB 19.4.7 - eksik" }),
+            "Platformun dogrudan alt surum klasorleri dogal sirayla listelenmedi.");
+        Assert(versions.Paths[0] == package && !VersionManager.IsTeziPackage(versions.Paths[1]),
+            "Gecerli klasor TEZI paketine, eksik klasor ise yuklenemez duruma eslenmedi.");
+    }
+    private static void RunStartupDefaultsTest()
+    {
+        var config = new AppConfig
+        {
+            SelectedUkb = 6,
+            ValidateTeziPackageNamePrefix = true
+        };
+        MethodInfo method = typeof(Form1).GetMethod(
+            "ApplyStartupDefaults",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(method != null, "Baslangic varsayilanlarini uygulayan koruma bulunamadi.");
+        method.Invoke(null, new object[] { config });
+        Assert(config.SelectedUkb == 1 && !config.ValidateTeziPackageNamePrefix,
+            "Uygulama acilisinda UKB1 varsayilani veya kapali on-ad kontrolu uygulanmadi.");
+    }
     private static void RunAdvancedSettingsTest()
     {
+        Localization.SetLanguage("TR");
         var mappings = new List<ProjectPackageMapping>
         {
             new ProjectPackageMapping
@@ -183,6 +542,7 @@ internal static class Program
             RecoverySlot = 7,
             RecoverySlot2 = 9,
             ValidateTeziPackageNamePrefix = false,
+            VersionsRootPath = Path.Combine(Path.GetTempPath(), "UKB-Surumleri-Test"),
             ProjectPackageMappings = mappings
         };
 
@@ -210,22 +570,25 @@ internal static class Program
                Descendants(dialog).OfType<Button>().Any(button => button.Text == "Seçilenleri Sil"),
             "Gelismis tablo secim, satir ekleme veya silme kontrolleri eksik.");
         Assert(!mappingGrid.AllowUserToResizeColumns && !mappingGrid.AllowUserToResizeRows &&
-               mappingGrid.Columns["EnvironmentName"].FillWeight ==
-               mappingGrid.Columns["PackageNamePrefix"].FillWeight,
-            "Gelismis tablo satir/sutunlari esit ve sabit degil.");
+               mappingGrid.Columns.Contains("EnvironmentName") &&
+               !mappingGrid.Columns.Contains("PackageNamePrefix"),
+            "Gelismis platform tablosu sabit degil veya eski TEZI on-ad sutunu kaldi.");
         ComboBox baudRateList = Descendants(dialog).OfType<ComboBox>().Single(combo =>
             combo.Items.Cast<object>().Any(item =>
                 int.TryParse(Convert.ToString(item), out int baud) && baud == 115200));
         Assert(baudRateList.FlatStyle == FlatStyle.Standard && baudRateList.DrawMode == DrawMode.Normal,
             "Baud rate listesi standart cerceve ve sol hizali metin modunda degil.");
-        CheckBox prefixValidation = Descendants(dialog).OfType<CheckBox>().Single(checkBox =>
-            checkBox.Text.IndexOf("TEZI paket ön adını", StringComparison.OrdinalIgnoreCase) >= 0);
-        Assert(!prefixValidation.Checked,
-            "TEZI on ad dogrulama secenegi kayitli kapali durumuyla acilmadi.");
+        Assert(!Descendants(dialog).OfType<CheckBox>().Any(checkBox =>
+                checkBox.Text.IndexOf("TEZI paket ön adını", StringComparison.OrdinalIgnoreCase) >= 0),
+            "Kaldirilan TEZI on-ad dogrulama secenegi ayar ekraninda gorunuyor.");
         Assert(!Descendants(dialog).OfType<CheckBox>().Any(checkBox =>
                 checkBox.Text.IndexOf("otomatik giriş", StringComparison.OrdinalIgnoreCase) >= 0),
             "Agdan surumde gereksiz Easy Installer otomatik giris alani gorunuyor.");
         string[] settingLabels = Descendants(dialog).OfType<Label>().Select(label => label.Text).ToArray();
+        Assert(Descendants(dialog).OfType<TextBox>().Any(textBox =>
+                   string.Equals(textBox.Text, config.VersionsRootPath, StringComparison.OrdinalIgnoreCase)) &&
+               settingLabels.Any(label => label == "UKB Sürümleri ana klasörü"),
+            "Gelismis seceneklerde manuel surum deposu yolu gorunmuyor.");
         Assert(settingLabels.Contains("Power Box IP") && settingLabels.Contains("Relay Box IP"),
             "Birlesik hedef tablosunun Power ve Relay IP alanlari olusturulmadi.");
         Assert(!settingLabels.Any(label => label.IndexOf("Yüklenecek hedef", StringComparison.OrdinalIgnoreCase) >= 0),
@@ -328,6 +691,31 @@ internal static class Program
         Assert(config.GetTarget(1).PowerSlot == 1 && config.GetTarget(1).RecoverySlot == 7,
             "Otomatik Şimşek profili birleşik UKB1 tablosuna uygulanmadı.");
 
+        var savedProfile = new AppConfig
+        {
+            AutoDetectSerialPort = false,
+            PowerBoxIp = "10.137.1.60",
+            RelayBoxIp = "10.137.1.40",
+            PowerSlot = 6,
+            PowerChannel1 = 2,
+            PowerChannel1Secondary = -1,
+            RecoverySlot = 9,
+            RecoveryChannel1 = 6
+        };
+        string savedSummary = HardwareAutoConfigurator.ApplyStartupDetection(
+            savedProfile,
+            "KSIMSEK",
+            preserveConfiguredProfile: true);
+        Assert(savedProfile.PowerBoxIp == "10.137.1.60" &&
+               savedProfile.RelayBoxIp == "10.137.1.40" &&
+               savedProfile.PowerSlot == 6 &&
+               savedProfile.PowerChannel1 == 2 &&
+               savedProfile.RecoverySlot == 9 &&
+               savedProfile.RecoveryChannel1 == 6,
+            "Settings.json Şimşek profili sabit varsayılanlarla ezildi.");
+        Assert(savedSummary.Contains("Settings.json donanım profili korundu"),
+            "Kayıtlı donanım profilinin korunduğu otomatik algılama özetine yazılmadı.");
+
         var yfyk = new AppConfig
         {
             AutoDetectSerialPort = false,
@@ -347,6 +735,71 @@ internal static class Program
             "YFYK Recovery MOD8/CH4 profili uygulanmadı.");
         Assert(yfykSummary.Contains("IP'ler korundu"),
             "YFYK otomatik profil özeti IP korumasını bildirmedi.");
+    }
+
+    private static void RunSixTargetUsbNcmAddressTest()
+    {
+        string[] expected =
+        {
+            "192.168.11.221",
+            "192.168.11.222",
+            "192.168.11.223",
+            "192.168.11.224",
+            "192.168.11.225",
+            "192.168.11.226"
+        };
+        for (int target = 1; target <= 6; target++)
+        {
+            string actual = HardwareAutoConfigurator.GetTargetNetworkServerIp(
+                "192.168.11.221", target);
+            Assert(actual == expected[target - 1],
+                $"UKB{target} USB-NCM PC adresi hatalı: {actual}");
+        }
+
+        bool overflowRejected = false;
+        try
+        {
+            HardwareAutoConfigurator.GetTargetNetworkServerIp("192.168.11.252", 6);
+        }
+        catch (InvalidOperationException)
+        {
+            overflowRejected = true;
+        }
+        Assert(overflowRejected, "Altı UKB adres aralığı taşması reddedilmedi.");
+    }
+    private static void RunStaleUsbNcmAdapterRejectionTest()
+    {
+        MethodInfo selector = typeof(HardwareAutoConfigurator).GetMethod(
+            "FindUsbNcmCandidate",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(selector != null, "USB-NCM adaptör seçici bulunamadı.");
+
+        HashSet<string> baseline = HardwareAutoConfigurator.GetNetworkInterfaceIds();
+        object[] args = { baseline, "203.0.113.254", false, null };
+        object selected = selector.Invoke(null, args);
+        Assert(selected == null && args[2] is bool isNew && !isNew,
+            "Başlangıçta açık olan eski USB-NCM adaptörü yeni UKB hedefi olarak seçildi.");
+        Assert(args[3] is string detail && detail.Contains("policy=new-or-same-target-owner"),
+            "Yeni veya aynı hedef sahibi adaptör politikası tanılama ayrıntısına yazılmadı.");
+    }
+    private static void RunUsbBulkTimeoutParsingTest()
+    {
+        MethodInfo parser = typeof(FlashWorkflow).GetMethod(
+            "IsUsbBulkTimeoutLine",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(parser != null, "UUU USB bulk timeout ayrıştırıcısı bulunamadı.");
+
+        bool exactTimeout = (bool)parser.Invoke(
+            null,
+            new object[] { "Fail Bulk(W): LIBUSB_ERROR_TIMEOUT (-7)(4.322s)" });
+        bool readTimeout = (bool)parser.Invoke(
+            null,
+            new object[] { "Fail Bulk(R): LIBUSB_ERROR_TIMEOUT (-7)(20s)" });
+        bool unrelatedTimeout = (bool)parser.Invoke(
+            null,
+            new object[] { "Wait for Known USB Device Appear..." });
+        Assert(exactTimeout && readTimeout && !unrelatedTimeout,
+            "USB bulk timeout yeniden deneme filtresi Bulk(W)/Bulk(R) hatalarını doğru seçmiyor.");
     }
 
     private static void RunModernUiSmokeTest(bool networkMode)
@@ -375,6 +828,7 @@ internal static class Program
         var workflowButton = (Button)type.GetField("btnWorkflowTab", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
         var helpPanel = (Panel)type.GetField("pnlHelp", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
         var helpGuide = (RichTextBox)type.GetField("txtHelpGuide", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+        var helpContent = (FlowLayoutPanel)type.GetField("pnlHelpContent", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
         var projectList = (ComboBox)type.GetField("projectList", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
         var platformLabel = (Label)type.GetField("label2", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
         var versionList = (ComboBox)type.GetField("surumList", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
@@ -394,6 +848,11 @@ internal static class Program
             "Yukleme/Yardim sekmeleri modern basliga eklenmedi.");
         Assert(helpPanel != null && helpGuide != null,
             "Yardim paneli veya kullanim kilavuzu olusturulmadi.");
+        Assert(helpContent != null &&
+               Descendants(helpContent).OfType<PictureBox>().Count() == 3 &&
+               Descendants(helpContent).OfType<Label>().Any(label =>
+                   label.Text.Contains("hızlı kontrol listesi", StringComparison.OrdinalIgnoreCase)),
+            "Gorsel yardim kontrol listesi veya uc aciklamali ekran goruntusu olusturulmadi.");
         Assert(helpPanel.Dock == DockStyle.Fill,
             "Yardim sekmesi ana ekrani tamamen kaplayan katman olarak ayarlanmadi.");
         Assert(helpGuide.Text.Contains("İlk kullanımdan önce") &&
@@ -518,6 +977,105 @@ internal static class Program
         SaveHelpSnapshot(form, type);
     }
 
+    private static void RunEnglishUiSmokeTest()
+    {
+        Localization.SetLanguage("EN");
+        using var form = new Form1();
+        Type type = typeof(Form1);
+        var config = new AppConfig
+        {
+            NetworkInstallMode = true,
+            SelectedUkb = 1,
+            UiLanguage = "EN"
+        };
+        config.MigrateLegacyTargetsToUnifiedTable();
+        type.GetField("_cfg", BindingFlags.Instance | BindingFlags.NonPublic)
+            .SetValue(form, config);
+        type.GetField("_projectName", BindingFlags.Instance | BindingFlags.NonPublic)
+            .SetValue(form, "KSIMSEK");
+        type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+        type.GetMethod("ConfigureProductionUi", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+
+        var versionLabel = (Label)type.GetField("label3", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var targetLabel = (Label)type.GetField("lblTargetSelector", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var operationLabel = (Label)type.GetField("lblHello", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var status = (Label)type.GetField("lblStatus", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var start = (Button)type.GetField("UKB1Yak", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+        var projects = (ComboBox)type.GetField("projectList", BindingFlags.Instance | BindingFlags.NonPublic)
+            .GetValue(form);
+
+        status.Text = "Moxa cihazlarına bağlanılıyor...";
+        start.Text = "UKB1 — SÜRÜM YÜKLEMEYİ BAŞLAT";
+        form.Text = "Sürüm Yükleme v-1.0.2";
+        projects.Items.Add("KSIMSEK (Varsayılan)");
+
+        Assert(form.Text == "Version Installation v-1.0.2" &&
+               versionLabel.Text == "1. Version to Install" &&
+               targetLabel.Text == "2. Target UKB" &&
+               operationLabel.Text == "3. Installation" &&
+               status.Text == "Connecting to Moxa devices..." &&
+               start.Text == "UKB1 — START VERSION INSTALLATION" &&
+               projects.GetItemText(projects.Items[0]) == "KSIMSEK (Default)",
+            "Ana ekranda Turkce veya karisik Ingilizce metin kaldi.");
+        Localization.SetLanguage("TR");
+    }
+
+    private static void RunConsoleResponsivenessPolicyTest()
+    {
+        using var form = new Form1();
+        form.CreateControl();
+        _ = form.Handle;
+        Type type = typeof(Form1);
+        type.GetMethod("AddRuntimeControls", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+        MethodInfo enqueue = type.GetMethod(
+            "Logger_MessageWritten",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo flush = type.GetMethod(
+            "FlushPendingConsoleEntries",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(enqueue != null && flush != null, "Konsol toplu isleme metotlari bulunamadi.");
+
+        for (int index = 0; index < 12000; index++)
+        {
+            enqueue.Invoke(form, new object[]
+            {
+                new LogEntry
+                {
+                    Timestamp = DateTime.Now,
+                    Level = index % 20 == 0 ? "WARN" : "INFO",
+                    Message = "[serial] high-volume-output-" + index + " " + new string('x', 80)
+                }
+            });
+        }
+
+        int pending = (int)type.GetField(
+            "_pendingConsoleCount",
+            BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+        Assert(pending <= 5000, "Konsol kuyrugu ust siniri asmisti: " + pending);
+        while (pending > 0)
+        {
+            flush.Invoke(form, null);
+            pending = (int)type.GetField(
+                "_pendingConsoleCount",
+                BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+        }
+
+        var console = (RichTextBox)type.GetField(
+            "txtProcessConsole",
+            BindingFlags.Instance | BindingFlags.NonPublic).GetValue(form);
+        Assert(console.TextLength <= 200000,
+            "Gorunen konsol metni bellek sinirini asti: " + console.TextLength);
+        Assert(console.Text.Contains("high-volume-output-11999"),
+            "Konsol kuyrugu en yeni satirlari korumadi.");
+    }
     private static void RunSingleTargetUiSmokeTest()
     {
         using var form = new Form1();
@@ -557,12 +1115,93 @@ internal static class Program
             "Paralel yukleme kodu veya arayuz kontrolleri kaynakta kaldi.");
     }
 
+    private static void RunRecoveryBootSequenceTest()
+    {
+        var events = new List<string>();
+        FlashWorkflow.ExecuteRecoveryBootSequenceAsync(
+            (value, _) =>
+            {
+                events.Add("POWER=" + value);
+                return Task.CompletedTask;
+            },
+            (value, _) =>
+            {
+                events.Add("RECOVERY=" + value);
+                return Task.CompletedTask;
+            },
+            (duration, _) =>
+            {
+                events.Add("DELAY=" + (int)duration.TotalMilliseconds);
+                return Task.CompletedTask;
+            },
+            _ =>
+            {
+                events.Add("USER_REPLUG");
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).GetAwaiter().GetResult();
+
+        string[] expected =
+        {
+            "POWER=0",
+            "DELAY=3000",
+            "RECOVERY=0",
+            "DELAY=500",
+            "USER_REPLUG",
+            "RECOVERY=1",
+            "DELAY=750",
+            "POWER=1",
+            "DELAY=1500"
+        };
+        Assert(events.SequenceEqual(expected),
+            "Recovery boot sirasi veya bekleme sureleri beklenen guvenli sekansla uyusmuyor: " +
+            string.Join(",", events));
+        Assert(FlashWorkflow.RecoveryPowerOffDwellMilliseconds >= 3000,
+            "OTG geri besleme korumasi icin Power OFF bekleme suresi yetersiz.");
+        Assert(FlashWorkflow.RecoveryRealSetupMilliseconds >= 750,
+            "Power ON oncesi Recovery REAL kurulum suresi yetersiz.");
+        Assert(FlashWorkflow.KnownUsbWarningSeconds >= 20,
+            "Sahada olculen 15 saniyelik USB hazirlanma suresinden once OTG uyarisi verilmemeli.");
+        Assert(FlashWorkflow.KnownUsbRecoveryRetrySeconds > FlashWorkflow.KnownUsbWarningSeconds,
+            "Otomatik Recovery yeniden denemesi kullanici uyarisindan sonra olmali.");
+
+        events.Clear();
+        FlashWorkflow.ExecuteRecoveryBootSequenceAsync(
+            (value, _) => { events.Add("POWER=" + value); return Task.CompletedTask; },
+            (value, _) => { events.Add("RECOVERY=" + value); return Task.CompletedTask; },
+            (duration, _) => { events.Add("DELAY=" + (int)duration.TotalMilliseconds); return Task.CompletedTask; },
+            null,
+            CancellationToken.None).GetAwaiter().GetResult();
+        Assert(!events.Contains("USER_REPLUG") && events.First() == "POWER=0" && events.Last() == "DELAY=1500",
+            "Otomatik recovery tekrarinda kullanici adimi olmadan tam sekans calismadi.");
+    }
+    private static void RunTeziFeedRecoveryPolicyTest()
+    {
+        Assert(Form1.SerialShellProbeAttempts >= 3,
+            "Geciken Easy Installer seri kabugu tek denemede vazgecilmemeli.");
+        Assert(Form1.SerialShellProbeRetryDelayMilliseconds >= 1000,
+            "Seri kabuk yeniden denemeleri arasindaki bekleme cok kisa.");
+        Assert(Form1.NetworkOnlyFeedDiscoveryTimeoutSeconds >= 10 &&
+               Form1.NetworkOnlyFeedDiscoveryTimeoutSeconds < 30,
+            "Seri kabuksuz feed ilk bekleme suresi ne erken ne de gereksiz uzun olmali.");
+
+        MethodInfo retryMethod = typeof(Form1).GetMethod(
+            "ProbeInteractiveShellWithRetryAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo reloadMethod = typeof(Form1).GetMethod(
+            "ReloadEasyInstallerWithPublishedFeedAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert(retryMethod != null && reloadMethod != null,
+            "Seri kabuk retry veya onceden duyurulan feed yeniden yukleme korumasi bulunamadi.");
+    }
+
     private static void RunOtgWaitStateParsingTest()
     {
         MethodInfo method = typeof(FlashWorkflow).GetMethod(
             "UpdateKnownUsbWaitState",
             BindingFlags.Static | BindingFlags.NonPublic);
         Assert(method != null, "OTG bekleme durum ayristiricisi bulunamadi.");
+
 
         object[] waitingArgs = { "Wait for Known USB Device Appear", 0, 0L };
         method.Invoke(null, waitingArgs);
@@ -664,6 +1303,22 @@ internal static class Program
 
     private static void RunEasyInstallerEvidenceTest()
     {
+        MethodInfo evidenceMatcher = typeof(UkbSerialMonitor).GetMethod(
+            "IsEasyInstallerBootEvidence",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(evidenceMatcher != null, "Easy Installer seri kanıt eşleyicisi bulunamadı.");
+        Func<string, bool> matches = line =>
+            (bool)evidenceMatcher.Invoke(null, new object[] { line });
+        Assert(!matches("Description: tezi-initramfs"),
+            "U-Boot tezi-initramfs metadata satırı yanlışlıkla hazır kabul edildi.");
+        Assert(!matches("TEZI image loading"),
+            "Genel TEZI kelimesi yanlışlıkla hazır kabul edildi.");
+        Assert(matches("Toradex Easy Installer 6.6.0+build.6 ()"),
+            "Easy Installer ürün başlığı hazır kanıtı olarak tanınmadı.");
+        Assert(matches("Welcome to the Toradex Easy Installer"),
+            "Easy Installer karşılama başlığı hazır kanıtı olarak tanınmadı.");
+        Assert(matches("/ #"),
+            "Gerçek recovery kabuk istemi hazır kanıtı olarak tanınmadı.");
         MethodInfo method = typeof(Form1).GetMethod(
             "WaitForEasyInstallerEvidenceAsync",
             BindingFlags.Static | BindingFlags.NonPublic);
@@ -764,6 +1419,243 @@ internal static class Program
         Assert(fallbackHealth == TeziHttpServer.HealthResponse, "Fallback HTTP port health failed.");
     }
 
+    private static void RunSequentialNetworkLifecycleTest(string testRoot)
+    {
+        string package = Path.Combine(testRoot, "sequential-http-package");
+        Directory.CreateDirectory(package);
+        File.WriteAllText(Path.Combine(package, "image.json"),
+            "{\"config_format\":1,\"autoinstall\":true}");
+
+        int reusablePort;
+        var first = new TeziHttpServer("127.0.0.1", 0);
+        first.SetPackageRoot(package);
+        first.Start();
+        reusablePort = first.Port;
+        using (var firstClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) })
+        {
+            string response = firstClient.GetStringAsync(first.BaseUrl + "/health")
+                .GetAwaiter().GetResult().Trim();
+            Assert(response == TeziHttpServer.HealthResponse,
+                "İlk UKB oturumunun HTTP health yanıtı başarısız.");
+        }
+        using var stalledClient = new TcpClient();
+        stalledClient.Connect(IPAddress.Loopback, reusablePort);
+        byte[] incompleteRequest = Encoding.ASCII.GetBytes(
+            "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+        stalledClient.GetStream().Write(incompleteRequest, 0, incompleteRequest.Length);
+        Thread.Sleep(75);
+        DateTime disposeStarted = DateTime.UtcNow;
+        first.Dispose();
+        Assert(DateTime.UtcNow - disposeStarted < TimeSpan.FromSeconds(3),
+            "Yarım kalan eski UKB HTTP isteği sunucu kapanışını bloke etti.");
+
+        using (var second = new TeziHttpServer("127.0.0.1", reusablePort))
+        {
+            second.SetPackageRoot(package);
+            second.Start();
+            using var secondClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+            string response = secondClient.GetStringAsync(second.BaseUrl + "/image_list.json")
+                .GetAwaiter().GetResult();
+            Assert(response.Contains("package/image.json"),
+                "İkinci UKB oturumu önceki HTTP portunu yeniden kullanamadı.");
+        }
+
+        MethodInfo sourceFactory = typeof(Form1).GetMethod(
+            "NewNetworkRequestSource",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(sourceFactory != null, "Ağ istek durumu üreticisi bulunamadı.");
+        var firstState = (TaskCompletionSource<string>)sourceFactory.Invoke(null, null);
+        var secondState = (TaskCompletionSource<string>)sourceFactory.Invoke(null, null);
+        firstState.TrySetResult("/image_list.json");
+        Assert(firstState.Task.IsCompleted && !secondState.Task.IsCompleted,
+            "Önceki UKB HTTP isteği yeni UKB oturum durumuna sızdı.");
+    }
+
+    private static void RunTwoEnvironmentMultiUkbInstallSimulation(string testRoot)
+    {
+        var environments = new[]
+        {
+            new { Name = "TUK", First = 1, Last = 3 },
+            new { Name = "KIHA", First = 4, Last = 6 }
+        };
+        string root = Path.Combine(testRoot, "multi-environment-simulation");
+        int sharedPort = 0;
+        int successCount = 0;
+        var retired = new List<(List<string> Events, int Count, string Name)>();
+
+        foreach (var environment in environments)
+        {
+            for (int target = environment.First; target <= environment.Last; target++)
+            {
+                Assert(retired.All(item => item.Events.Count == item.Count),
+                    "Kapatılmış bir UKB oturumuna yeni HTTP olayı sızdı.");
+
+                string session = environment.Name + "-UKB" + target;
+                string package = Path.Combine(root, environment.Name, "UKB" + target);
+                Directory.CreateDirectory(package);
+                int payloadSize = target == 2 ? 16 * 1024 * 1024 : 1024 * 1024;
+                byte[] payload = Enumerable.Range(0, payloadSize)
+                    .Select(i => (byte)((i + target * 17 + environment.Name.Length * 31) % 251))
+                    .ToArray();
+                string hash = Convert.ToHexString(SHA256.HashData(payload));
+                File.WriteAllText(Path.Combine(package, "image.json"),
+                    JsonSerializer.Serialize(new
+                    {
+                        config_format = 1,
+                        name = session,
+                        platform = environment.Name,
+                        ukb = target,
+                        autoinstall = true,
+                        payload = "payload.bin",
+                        payload_sha256 = hash
+                    }));
+                File.WriteAllBytes(Path.Combine(package, "payload.bin"), payload);
+                File.WriteAllText(Path.Combine(package, "prepare.sh"), "#!/bin/sh\nexit 0\n");
+                File.WriteAllText(Path.Combine(package, "wrapup.sh"), "#!/bin/sh\npoweroff -f\nexit 0\n");
+
+                var events = new List<string>();
+                var eventSync = new object();
+                var server = new TeziHttpServer("127.0.0.1", sharedPort);
+                server.RequestStarted += path => { lock (eventSync) events.Add("START:" + path); };
+                server.RequestCompleted += path => { lock (eventSync) events.Add("DONE:" + path); };
+                server.SetPackageRoot(package);
+                server.Start();
+                if (sharedPort == 0) sharedPort = server.Port;
+                Assert(server.Port == sharedPort, session + " ortak HTTP portunu kullanamadı.");
+
+                string address = "192.168.11." + (220 + target);
+                string mdns = Encoding.ASCII.GetString(
+                    TeziMdnsAdvertiser.BuildAnnouncementPacketForTest(
+                        address, sharedPort, "/image_list.json"));
+                Assert(mdns.Contains("192-168-11-" + (220 + target)),
+                    session + " mDNS kimliği hedefe özel değil.");
+
+                using (var client = new HttpClient { Timeout = TimeSpan.FromSeconds(10) })
+                {
+                    Assert(client.GetStringAsync(server.BaseUrl + "/health")
+                        .GetAwaiter().GetResult().Trim() == TeziHttpServer.HealthResponse,
+                        session + " health kontrolü başarısız.");
+
+                    using (JsonDocument feed = JsonDocument.Parse(
+                        client.GetStringAsync(server.BaseUrl + "/image_list.json")
+                            .GetAwaiter().GetResult()))
+                    {
+                        Assert(feed.RootElement.GetProperty("images")[0].GetString() ==
+                               "package/image.json",
+                            session + " feed yolu hatalı.");
+                    }
+
+                    using (JsonDocument image = JsonDocument.Parse(
+                        client.GetStringAsync(server.BaseUrl + "/package/image.json")
+                            .GetAwaiter().GetResult()))
+                    {
+                        JsonElement metadata = image.RootElement;
+                        Assert(metadata.GetProperty("platform").GetString() == environment.Name,
+                            session + " başka platformun metadata dosyasını aldı.");
+                        Assert(metadata.GetProperty("ukb").GetInt32() == target,
+                            session + " başka UKB metadata dosyasını aldı.");
+                        Assert(metadata.GetProperty("autoinstall").GetBoolean(),
+                            session + " autoinstall etkin değil.");
+                        Assert(metadata.GetProperty("payload_sha256").GetString() == hash,
+                            session + " payload hash metadata değeri karıştı.");
+                    }
+
+                    using var rangeRequest = new HttpRequestMessage(
+                        HttpMethod.Get, server.BaseUrl + "/package/payload.bin");
+                    rangeRequest.Headers.Range = new RangeHeaderValue(4096, 12287);
+                    using HttpResponseMessage rangeResponse = client.Send(rangeRequest);
+                    byte[] range = rangeResponse.Content.ReadAsByteArrayAsync()
+                        .GetAwaiter().GetResult();
+                    Assert(rangeResponse.StatusCode == HttpStatusCode.PartialContent &&
+                           range.SequenceEqual(payload.Skip(4096).Take(8192)),
+                        session + " range aktarımı başarısız.");
+
+                    byte[] downloaded = client.GetByteArrayAsync(
+                        server.BaseUrl + "/package/payload.bin").GetAwaiter().GetResult();
+                    Assert(Convert.ToHexString(SHA256.HashData(downloaded)) == hash,
+                        session + " tam payload SHA-256 doğrulaması başarısız.");
+                    Assert(client.GetStringAsync(server.BaseUrl + "/package/prepare.sh")
+                        .GetAwaiter().GetResult().Contains("exit 0"),
+                        session + " prepare.sh alınamadı.");
+                    Assert(client.GetStringAsync(server.BaseUrl + "/package/wrapup.sh")
+                        .GetAwaiter().GetResult().Contains("poweroff -f"),
+                        session + " wrapup.sh alınamadı.");
+                }
+
+                SpinWait.SpinUntil(() =>
+                {
+                    lock (eventSync)
+                        return events.Contains("DONE:/image_list.json") &&
+                               events.Contains("DONE:/package/image.json") &&
+                               events.Contains("DONE:/package/payload.bin");
+                }, TimeSpan.FromSeconds(2));
+                lock (eventSync)
+                {
+                    Assert(events.Contains("START:/package/payload.bin") &&
+                           events.Contains("DONE:/package/payload.bin"),
+                        session + " payload olay zinciri tamamlanmadı.");
+                }
+
+                TcpClient stalled = null;
+                int faultStartsBefore;
+                int faultCompletionsBefore;
+                lock (eventSync)
+                {
+                    faultStartsBefore = events.Count(item => item == "START:/package/payload.bin");
+                    faultCompletionsBefore = events.Count(item => item == "DONE:/package/payload.bin");
+                }
+                if (target == 2 || target == 5)
+                {
+                    stalled = new TcpClient { ReceiveBufferSize = 256 };
+                    stalled.Connect(IPAddress.Loopback, sharedPort);
+                    string requestText = target == 2
+                        ? "GET /package/payload.bin HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+                        : "GET /package/payload.bin HTTP/1.1\r\nHost: 127.0.0.1\r\n";
+                    byte[] partial = Encoding.ASCII.GetBytes(requestText);
+                    stalled.GetStream().Write(partial, 0, partial.Length);
+                    if (target == 2)
+                    {
+                        bool faultTransferStarted = SpinWait.SpinUntil(() =>
+                        {
+                            lock (eventSync)
+                                return events.Count(item => item == "START:/package/payload.bin") > faultStartsBefore;
+                        }, TimeSpan.FromSeconds(2));
+                        bool faultTransferCompleted;
+                        lock (eventSync)
+                            faultTransferCompleted = events.Count(item => item == "DONE:/package/payload.bin") > faultCompletionsBefore;
+                        if (!faultTransferStarted || faultTransferCompleted)
+                        {
+                            server.Dispose();
+                            stalled.Dispose();
+                            Assert(faultTransferStarted,
+                                session + " kesinti testi payload aktarımını başlatmadı.");
+                            Assert(!faultTransferCompleted,
+                                session + " kesinti enjekte edilmeden payload aktarımı tamamlandı.");
+                        }
+                    }
+                    else
+                    {
+                        Thread.Sleep(50);
+                    }
+                }
+
+                DateTime stopping = DateTime.UtcNow;
+                server.Dispose();
+                stalled?.Dispose();
+                Assert(DateTime.UtcNow - stopping < TimeSpan.FromSeconds(3),
+                    session + " yarım istek nedeniyle kapanamadı.");
+                lock (eventSync)
+                    retired.Add((events, events.Count, session));
+                successCount++;
+            }
+        }
+
+        Assert(retired.All(item => item.Events.Count == item.Count),
+            "Simülasyon sonunda eski oturuma geç HTTP olayı sızdı.");
+        Assert(successCount == 6,
+            "İki platformdaki altı UKB simülasyonunun tamamı bitmedi.");
+    }
+
     private static void RunNetworkPackagePreparationTest(string testRoot)
     {
         string repository = Path.Combine(testRoot, "network-source");
@@ -806,13 +1698,72 @@ internal static class Program
             "mDNS servis örnek adı Toradex resmî yayın adıyla eşleşmiyor.");
         Assert(text.Contains("name=Custom Toradex Easy Installer Feed"),
             "mDNS TXT name alanı servis örnek adıyla eşleşmiyor.");
+        Assert(text.Contains("192-168-11-221"),
+            "mDNS servis kimliği seçili USB-NCM arayüzüne özel değil.");
+        Assert(text.Contains("ukb-surum-yakma-192-168-11-221"),
+            "mDNS ana makine adı seçili USB-NCM arayüzüne özel değil.");
         Assert(text.Contains("path=/image_list.json"), "mDNS paketinde feed yolu yok.");
         Assert(text.Contains("enabled=1"), "mDNS paketinde enabled TXT alanı yok.");
         Assert(packet.Contains((byte)192) && packet.Contains((byte)221), "mDNS paketinde IPv4 adresi yok.");
         Assert(packet[6] == 0 && packet[7] == 1, "mDNS PTR yanıt sayısı 1 değil.");
         Assert(packet[10] == 0 && packet[11] == 3, "mDNS SRV/TXT/A ek kayıt sayısı 3 değil.");
+
+        var identities = new HashSet<string>(StringComparer.Ordinal);
+        for (int target = 1; target <= 6; target++)
+        {
+            string ip = "192.168.11." + (220 + target);
+            byte[] targetPacket = TeziMdnsAdvertiser.BuildAnnouncementPacketForTest(
+                ip, 8088, "/image_list.json");
+            string targetText = Encoding.ASCII.GetString(targetPacket);
+            string suffix = "192-168-11-" + (220 + target);
+            Assert(targetText.Contains(suffix),
+                $"UKB{target} mDNS servis kimliği arayüze özel değil.");
+            Assert(identities.Add(Convert.ToBase64String(targetPacket)),
+                $"UKB{target} önceki bir UKB ile aynı mDNS paketini üretti.");
+            Assert(ReadDnsRecordTtls(targetPacket).All(ttl => ttl == 120),
+                $"UKB{target} normal mDNS duyurusunun TTL değeri 120 değil.");
+        }
+
+        byte[] goodbye = TeziMdnsAdvertiser.BuildGoodbyePacketForTest(
+            "192.168.11.221", 8088, "/image_list.json");
+        uint[] goodbyeTtls = ReadDnsRecordTtls(goodbye);
+        Assert(goodbyeTtls.Length == 4 && goodbyeTtls.All(ttl => ttl == 0),
+            "mDNS kapanış paketi bütün PTR/SRV/TXT/A kayıtlarını TTL=0 göndermiyor.");
     }
 
+    private static uint[] ReadDnsRecordTtls(byte[] packet)
+    {
+        int recordCount = (packet[6] << 8) | packet[7];
+        recordCount += (packet[8] << 8) | packet[9];
+        recordCount += (packet[10] << 8) | packet[11];
+        int offset = 12;
+        var result = new List<uint>();
+        for (int record = 0; record < recordCount; record++)
+        {
+            while (packet[offset] != 0)
+            {
+                int length = packet[offset++];
+                if ((length & 0xC0) == 0xC0)
+                {
+                    offset++;
+                    break;
+                }
+                offset += length;
+            }
+            if (packet[offset] == 0)
+                offset++;
+            offset += 4; // type + class
+            uint ttl = ((uint)packet[offset] << 24) |
+                       ((uint)packet[offset + 1] << 16) |
+                       ((uint)packet[offset + 2] << 8) |
+                       packet[offset + 3];
+            result.Add(ttl);
+            offset += 4;
+            int dataLength = (packet[offset] << 8) | packet[offset + 1];
+            offset += 2 + dataLength;
+        }
+        return result.ToArray();
+    }
     private static void RunTeziVncRefreshPacketTest()
     {
         byte[] sequence = TeziVncClient.BuildRefreshKeySequenceForTest();
@@ -947,6 +1898,7 @@ internal static class Program
             Logger.Initialize(logPath);
             Logger.Info("görünür test mesajı");
             Logger.Checkpoint("TEST_STAGE", "OK", "step=1");
+            Logger.Flush();
 
             Assert(File.Exists(Logger.CurrentSessionLogPath), "Oturuma özel log dosyası oluşturulmadı.");
             string sessionLog = File.ReadAllText(Logger.CurrentSessionLogPath);

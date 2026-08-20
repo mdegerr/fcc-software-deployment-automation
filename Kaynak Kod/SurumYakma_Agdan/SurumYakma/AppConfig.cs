@@ -55,6 +55,7 @@ namespace SurumYakma
         public bool OnlyFlash { get; set; } = true;
         public string SurumlerPath { get; set; } = "";
         public string VersionsRootPath { get; set; } = "";
+        public string UiLanguage { get; set; } = "TR";
 
         public string PowerBoxIp { get; set; } = "";
         public string RelayBoxIp { get; set; } = "";
@@ -83,7 +84,7 @@ namespace SurumYakma
         public bool EasyInstallerAutoLoginEnabled { get; set; }
         public string EasyInstallerUserName { get; set; } = "";
         public string EasyInstallerPasswordProtected { get; set; } = "";
-        public bool ValidateTeziPackageNamePrefix { get; set; } = true;
+        public bool ValidateTeziPackageNamePrefix { get; set; } = false;
         public List<ProjectPackageMapping> ProjectPackageMappings { get; set; } =
             ProjectPackageMapping.CreateDefaults();
 

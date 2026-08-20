@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -24,6 +25,8 @@ namespace SurumYakma
         private readonly int _requestedPort;
         private readonly SemaphoreSlim _clientLimit = new SemaphoreSlim(4, 4);
         private readonly object _sync = new object();
+        private readonly object _clientTasksSync = new object();
+        private readonly HashSet<Task> _clientTasks = new HashSet<Task>();
         private TcpListener _listener;
         private CancellationTokenSource _cancellation;
         private Task _acceptTask;
@@ -130,8 +133,28 @@ namespace SurumYakma
                 while (!ct.IsCancellationRequested)
                 {
                     TcpClient client = await _listener.AcceptTcpClientAsync(ct);
-                    await _clientLimit.WaitAsync(ct);
-                    _ = HandleClientAndReleaseAsync(client, ct);
+                    try
+                    {
+                        await _clientLimit.WaitAsync(ct);
+                    }
+                    catch
+                    {
+                        client.Dispose();
+                        throw;
+                    }
+
+                    Task clientTask = HandleClientAndReleaseAsync(client, ct);
+                    lock (_clientTasksSync)
+                        _clientTasks.Add(clientTask);
+                    _ = clientTask.ContinueWith(
+                        completed =>
+                        {
+                            lock (_clientTasksSync)
+                                _clientTasks.Remove(completed);
+                        },
+                        CancellationToken.None,
+                        TaskContinuationOptions.ExecuteSynchronously,
+                        TaskScheduler.Default);
                 }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -170,6 +193,7 @@ namespace SurumYakma
         private async Task HandleClientAsync(TcpClient client, CancellationToken ct)
         {
             client.NoDelay = true;
+            client.SendBufferSize = 1024 * 1024;
             using NetworkStream stream = client.GetStream();
             using var reader = new StreamReader(
                 stream, Encoding.ASCII, false, 4096, leaveOpen: true);
@@ -336,9 +360,9 @@ namespace SurumYakma
 
             using FileStream input = new FileStream(
                 file, FileMode.Open, FileAccess.Read, FileShare.Read,
-                1024 * 128, FileOptions.Asynchronous | FileOptions.SequentialScan);
+                1024 * 512, FileOptions.Asynchronous | FileOptions.SequentialScan);
             input.Position = start;
-            byte[] buffer = new byte[1024 * 128];
+            byte[] buffer = new byte[1024 * 512];
             long remaining = length;
             while (remaining > 0)
             {
@@ -433,12 +457,33 @@ namespace SurumYakma
             _cancellation?.Cancel();
             try { _listener?.Stop(); } catch { }
             try { _acceptTask?.Wait(1000); } catch { }
+
+            Task[] activeClients;
+            lock (_clientTasksSync)
+                activeClients = _clientTasks.ToArray();
+            bool clientsStopped = true;
+            if (activeClients.Length > 0)
+            {
+                try
+                {
+                    clientsStopped = Task.WaitAll(activeClients, 2000);
+                }
+                catch
+                {
+                    clientsStopped = activeClients.All(task => task.IsCompleted);
+                }
+            }
+
             _cancellation?.Dispose();
-            _clientLimit.Dispose();
+            if (clientsStopped)
+                _clientLimit.Dispose();
             _listener = null;
             _acceptTask = null;
             _cancellation = null;
-            Logger.Checkpoint("TEZI_HTTP_SERVER", "STOP");
+            Logger.Checkpoint(
+                "TEZI_HTTP_SERVER",
+                "STOP",
+                $"activeClients={activeClients.Length}; clientsStopped={clientsStopped}");
         }
     }
 }

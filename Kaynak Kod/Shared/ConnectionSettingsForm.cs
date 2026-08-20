@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Windows.Forms;
+using MessageBox = SurumYakma.LocalizedMessageBox;
 
 namespace SurumYakma
 {
@@ -41,12 +42,7 @@ namespace SurumYakma
         private readonly TextBox _easyUserName = new TextBox();
         private readonly TextBox _easyPassword = new TextBox { UseSystemPasswordChar = true };
         private readonly DataGridView _projectMappings = new DataGridView();
-        private readonly CheckBox _validatePackagePrefix = new CheckBox
-        {
-            Text = "TEZI paket ön adını ortam değişkenine göre doğrula",
-            AutoSize = true,
-            Checked = true
-        };
+
         private readonly Label _mappingInfo = new Label { AutoSize = true, ForeColor = Color.DarkSlateBlue };
         private readonly RadioButton _targetUkb1 = new RadioButton { Text = "UKB1", AutoSize = true, Checked = true };
         private readonly RadioButton _targetUkb2 = new RadioButton { Text = "UKB2", AutoSize = true };
@@ -189,6 +185,7 @@ namespace SurumYakma
             _baudRate.FlatStyle = FlatStyle.Standard;
             _baudRate.DrawMode = DrawMode.Normal;
             _baudRate.Margin = new Padding(3);
+            Localization.Apply(this);
         }
 
         private void LoadValues()
@@ -214,7 +211,6 @@ namespace SurumYakma
             _easyAutoLogin.Checked = _config.EasyInstallerAutoLoginEnabled;
             _easyUserName.Text = _config.EasyInstallerUserName;
             _easyPassword.Text = _config.EasyInstallerPassword;
-            _validatePackagePrefix.Checked = _config.ValidateTeziPackageNamePrefix;
             _targetUkb1.Checked = _config.SelectedUkb != 2;
             _targetUkb2.Checked = _config.SelectedUkb == 2;
             LoadSwarmTargets();
@@ -321,7 +317,7 @@ namespace SurumYakma
                     _config.EasyInstallerPassword = _easyPassword.Text;
                 }
                 _config.ProjectPackageMappings = ReadProjectMappings();
-                _config.ValidateTeziPackageNamePrefix = _validatePackagePrefix.Checked;
+                _config.ValidateTeziPackageNamePrefix = false;
                 SaveSwarmTargets();
                 _config.ValidateForSave();
                 _config.SaveMachineSpecific();
@@ -348,6 +344,33 @@ namespace SurumYakma
                 panel.RowStyles.Add(new RowStyle(
                     row == gridRow ? SizeType.Percent : SizeType.AutoSize,
                     row == gridRow ? 100 : 0));
+
+            panel.Controls.Add(new Label
+            {
+                Text = "Sürüm deposu",
+                Font = new Font("Microsoft Sans Serif", 10F, FontStyle.Bold),
+                AutoSize = true,
+                Margin = new Padding(3, 4, 3, 5)
+            });
+            var versionsPathPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                AutoSize = true,
+                WrapContents = false,
+                Margin = new Padding(3, 0, 3, 12)
+            };
+            _versionsRootPath.Width = 700;
+            var browseVersionsPath = new Button { Text = "Klasör Seç", AutoSize = true };
+            browseVersionsPath.Click += (s, e) => SelectVersionsRootPath();
+            versionsPathPanel.Controls.Add(new Label
+            {
+                Text = "UKB Sürümleri ana klasörü",
+                AutoSize = true,
+                Margin = new Padding(0, 8, 10, 0)
+            });
+            versionsPathPanel.Controls.Add(_versionsRootPath);
+            versionsPathPanel.Controls.Add(browseVersionsPath);
+            panel.Controls.Add(versionsPathPanel);
 
             if (_showEasyInstallerCredentials)
             {
@@ -389,18 +412,10 @@ namespace SurumYakma
             }
             panel.Controls.Add(new Label
             {
-                Text = "Ortam adı → TEZI paket adı eşlemesi",
+                Text = "Platform listesi",
                 Font = new Font("Microsoft Sans Serif", 10F, FontStyle.Bold),
                 AutoSize = true,
                 Margin = new Padding(3, 4, 3, 4)
-            });
-            panel.Controls.Add(_validatePackagePrefix);
-            panel.Controls.Add(new Label
-            {
-                Text = "Açıksa paket ön adı UAV_PROJECT_NAME ile karşılaştırılır. Kapalıysa ön ad kontrol edilmez; geçerli tam TEZI yapısı bulunması yeterlidir.",
-                AutoSize = true,
-                ForeColor = Color.DimGray,
-                Margin = new Padding(3, 0, 3, 6)
             });
 
             _projectMappings.Dock = DockStyle.Fill;
@@ -432,14 +447,7 @@ namespace SurumYakma
                 Resizable = DataGridViewTriState.False,
                 SortMode = DataGridViewColumnSortMode.NotSortable
             });
-            _projectMappings.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                Name = "PackageNamePrefix",
-                HeaderText = "TEZI paket adı / ön eki",
-                FillWeight = 100,
-                Resizable = DataGridViewTriState.False,
-                SortMode = DataGridViewColumnSortMode.NotSortable
-            });
+
             panel.Controls.Add(_projectMappings);
 
             var mappingButtons = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true };
@@ -686,13 +694,13 @@ namespace SurumYakma
         {
             _projectMappings.Rows.Clear();
             foreach (ProjectPackageMapping mapping in mappings)
-                _projectMappings.Rows.Add(false, mapping.EnvironmentName, mapping.PackageNamePrefix);
+                _projectMappings.Rows.Add(false, mapping.EnvironmentName);
             UpdateMappingInfo();
         }
 
         private void AddMappingRow()
         {
-            int index = _projectMappings.Rows.Add(false, "", "");
+            int index = _projectMappings.Rows.Add(false, "");
             _projectMappings.CurrentCell = _projectMappings.Rows[index].Cells["EnvironmentName"];
             _projectMappings.BeginEdit(true);
         }
@@ -720,7 +728,7 @@ namespace SurumYakma
                     return;
                 }
             }
-            _projectMappings.Rows.Add(false, _projectName, _projectName);
+            _projectMappings.Rows.Add(false, _projectName);
             UpdateMappingInfo();
         }
 
@@ -732,13 +740,12 @@ namespace SurumYakma
                 if (row.IsNewRow)
                     continue;
                 string environmentName = Convert.ToString(row.Cells["EnvironmentName"].Value)?.Trim() ?? "";
-                string packagePrefix = Convert.ToString(row.Cells["PackageNamePrefix"].Value)?.Trim() ?? "";
-                if (environmentName.Length == 0 && packagePrefix.Length == 0)
+                if (environmentName.Length == 0)
                     continue;
                 result.Add(new ProjectPackageMapping
                 {
                     EnvironmentName = environmentName,
-                    PackageNamePrefix = packagePrefix
+                    PackageNamePrefix = environmentName
                 });
             }
             return result;
@@ -752,11 +759,8 @@ namespace SurumYakma
                 return;
             }
 
-            string packageName = VersionManager.NormalizeProjectFamily(
-                _projectName,
-                ReadProjectMappings());
-            _mappingInfo.Text = "Aktif: " + _projectName +
-                (packageName.Length == 0 ? " (eşleme yok)" : " → " + packageName);
+            _mappingInfo.Text = "Aktif platform: " + _projectName;
+
         }
 
         private static bool EnvironmentPatternMatches(string pattern, string environmentName)

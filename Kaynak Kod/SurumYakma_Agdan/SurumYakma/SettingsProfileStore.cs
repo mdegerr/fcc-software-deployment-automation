@@ -122,6 +122,8 @@ namespace SurumYakma
                     profile,
                     "ValidateTeziPackageNamePrefix",
                     config.ValidateTeziPackageNamePrefix);
+                config.UiLanguage = ReadString(profile, "UiLanguage", config.UiLanguage);
+                config.VersionsRootPath = ReadString(profile, "VersionsRootPath", config.VersionsRootPath);
                 bool hadUnifiedTargets = false;
                 if (profile["SwarmTargets"] is JsonArray swarmTargets)
                 {
@@ -251,6 +253,8 @@ namespace SurumYakma
                 ["SelectedUkb"] = config.SelectedUkb,
                 ["SwarmModeEnabled"] = config.SwarmModeEnabled,
                 ["ValidateTeziPackageNamePrefix"] = config.ValidateTeziPackageNamePrefix,
+                ["UiLanguage"] = config.UiLanguage,
+                ["VersionsRootPath"] = config.VersionsRootPath,
                 ["Serial"] = new JsonObject
                 {
                     ["ComPort"] = config.SerialPortName,
