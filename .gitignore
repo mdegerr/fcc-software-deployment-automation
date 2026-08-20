@@ -1,0 +1,26 @@
+# Derleme çıktıları
+**/bin/
+**/obj/
+.vs/
+*.user
+*.suo
+
+# Saha ayarları ve kullanıcıya özel yapılandırmalar
+**/Settings.json
+**/Settings.json.bak
+**/appsettings*.json
+
+# Çalıştırma paketi GitHub Release varlığı olarak yayımlanır
+Uygulama/
+
+# Loglar ve gerçek sürüm paketleri
+**/logs/
+*.log
+*.ofp
+UKB Sürümleri/
+
+# Yerel araç/ajan verileri
+.agents/
+.codex/
+.publish-temp/
+.release-package/
