@@ -47,7 +47,7 @@ namespace SurumYakma
             ["HTTP portu"] = "HTTP Port",
             ["Baud rate"] = "Baud Rate",
             ["Tamam"] = "OK"
-            ,["Sürüm Yükleme v-1.0.2"] = "Version Installation v-1.0.2"
+            ,["Sürüm Yükleme v-1.0.3"] = "Version Installation v-1.0.3"
             ,["Bağlantı ve Donanım Ayarları"] = "Connection and Hardware Settings"
             ,["1. Yüklenecek Sürüm"] = "1. Version to Install"
             ,["2. Yüklenecek UKB"] = "2. Target UKB"

@@ -416,6 +416,7 @@ namespace SurumYakma
                 RemoveLicenseForUnattendedInstall(imageJson);
                 SetJsonBoolean(imageJson, "autoinstall", true);
                 EnsurePowerOff(wrapup);
+                ValidatePreparedNetworkPackage(preparingPath);
                 Directory.Move(preparingPath, readyPath);
                 Logger.Checkpoint(
                     "NETWORK_PACKAGE_PREPARE",
@@ -429,6 +430,70 @@ namespace SurumYakma
                     Directory.Delete(preparingPath, true);
                 throw;
             }
+        }
+
+        private static void ValidatePreparedNetworkPackage(string packageRoot)
+        {
+            string imageJsonPath = Path.Combine(packageRoot, "image.json");
+            JsonObject image = ReadJsonObject(imageJsonPath);
+            if (image["autoinstall"]?.GetValue<bool>() != true)
+                throw new InvalidOperationException("Ağ staging image.json dosyasında autoinstall=true doğrulanamadı.");
+            if (image.ContainsKey("license") || image.ContainsKey("license_title"))
+                throw new InvalidOperationException("Ağ staging image.json dosyasında etkileşimli lisans alanı kaldı.");
+            if (image["config_format"] != null)
+            {
+                string value = image["config_format"].ToString();
+                if (!int.TryParse(value, out int format) || format < 1)
+                    throw new InvalidOperationException("TEZI config_format değeri geçersiz: " + value);
+            }
+
+            var references = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            CollectPackageReferences(image, null, references);
+            string root = Path.GetFullPath(packageRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            foreach (string reference in references)
+            {
+                if (Uri.TryCreate(reference, UriKind.Absolute, out Uri uri) &&
+                    (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps))
+                    continue;
+                string full = Path.GetFullPath(Path.Combine(packageRoot, reference.Replace('/', Path.DirectorySeparatorChar)));
+                if (!full.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("TEZI paket referansı paket dışına çıkıyor: " + reference);
+                if (!File.Exists(full))
+                    throw new FileNotFoundException("TEZI image.json tarafından kullanılan dosya bulunamadı: " + reference, full);
+                if (new FileInfo(full).Length == 0)
+                    throw new InvalidOperationException("TEZI image.json tarafından kullanılan dosya boş: " + reference);
+            }
+            Logger.Checkpoint("NETWORK_PACKAGE_MANIFEST_VALIDATE", "SUCCESS",
+                $"root={packageRoot}; referencedFiles={references.Count}; autoinstall=true; interactiveLicense=false");
+        }
+
+        private static void CollectPackageReferences(JsonNode node, string propertyName, ISet<string> references)
+        {
+            if (node == null) return;
+            if (node is JsonValue value)
+            {
+                if (IsPackageFileReferenceProperty(propertyName) &&
+                    value.TryGetValue<string>(out string path) && !string.IsNullOrWhiteSpace(path))
+                    references.Add(path.Trim());
+                return;
+            }
+            if (node is JsonObject obj)
+            {
+                foreach (KeyValuePair<string, JsonNode> item in obj)
+                    CollectPackageReferences(item.Value, item.Key, references);
+                return;
+            }
+            if (node is JsonArray array)
+                foreach (JsonNode item in array) CollectPackageReferences(item, propertyName, references);
+        }
+
+        private static bool IsPackageFileReferenceProperty(string propertyName)
+        {
+            return propertyName != null && new[]
+            {
+                "filename", "filelist", "image_filename", "u_boot_env", "prepare_script", "wrapup_script",
+                "error_script", "icon", "marketing", "releasenotes"
+            }.Contains(propertyName, StringComparer.OrdinalIgnoreCase);
         }
 
         /// <summary>Flash bellekte zaten duran bir sürümü, üzerine kurulacak şekilde işaretler (autoinstall=true, poweroff -f).</summary>

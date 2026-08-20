@@ -33,6 +33,8 @@ internal static class Program
         {
             RunSessionLoggerAndCheckpointTest(testRoot);
             Console.WriteLine("PASS: tarih-saatli oturum logu ve gizli checkpoint kaydı");
+            RunExpertDiagnosticsTest(testRoot);
+            Console.WriteLine("PASS: hata anı uzman tanı paketi ve yerel Windows sorguları");
             RunSettingsProfileStoreTest(testRoot);
             Console.WriteLine("PASS: Settings.json ortam profili, mevcut alan koruma ve yedekleme");
             RunVersionPreparationTest(testRoot);
@@ -56,7 +58,7 @@ internal static class Program
             RunSwarmUavConfigurationTest(testRoot);
             Console.WriteLine("PASS: SURU IHA alti UKB hedef paneli ve secili hedef cozumleme");
             RunSixTargetUsbNcmAddressTest();
-            Console.WriteLine("PASS: UKB1-UKB6 benzersiz USB-NCM PC adresleri ve sınır doğrulaması");
+            Console.WriteLine("PASS: UKB1-UKB6 sıralı ortak USB-NCM PC adresi");
             RunStaleUsbNcmAdapterRejectionTest();
             Console.WriteLine("PASS: USB-NCM yalnızca yeni veya aynı hedef IP sahibinden seçiliyor");
             RunFolderBasedTeziDiscoveryTest(testRoot);
@@ -69,6 +71,8 @@ internal static class Program
             Console.WriteLine("PASS: OTG bekleme ve yeniden baglanma durum algilama");
             RunTeziFeedRecoveryPolicyTest();
             Console.WriteLine("PASS: seri kabuk gecikmesi ve onceden duyurulan feed ile Easy Installer yeniden yukleme politikasi");
+            RunTeziLateResponseGraceTest();
+            Console.WriteLine("PASS: final TEZI feed gec yanit toleransi ve timeout yarisi korumasi");
             RunUsbBulkTimeoutParsingTest();
             Console.WriteLine("PASS: UUU USB bulk timeout hatasi secici yeniden deneme algilama");
             RunRecoveryToolSelfHealTest(testRoot);
@@ -110,6 +114,75 @@ internal static class Program
             if (Directory.Exists(testRoot))
                 Directory.Delete(testRoot, true);
         }
+    }
+
+    private static void RunTeziLateResponseGraceTest()
+    {
+        MethodInfo method = typeof(Form1).GetMethod(
+            "WaitForFinalFeedLateResponseAsync",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(method != null, "Final feed geç yanıt yardımcı metodu bulunamadı.");
+
+        var feed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string> wait = (Task<string>)method.Invoke(null, new object[]
+        {
+            feed.Task,
+            Task.CompletedTask,
+            "kontrollü timeout",
+            "ATTEMPT_2",
+            CancellationToken.None,
+            TimeSpan.FromMilliseconds(500)
+        });
+        Task.Delay(80).ContinueWith(_ => feed.TrySetResult("/image_list.json"));
+        Assert(wait.GetAwaiter().GetResult() == "/image_list.json",
+            "Final denemede geç gelen feed isteği kabul edilmedi.");
+
+        var nonFinalFeed = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<string> nonFinal = (Task<string>)method.Invoke(null, new object[]
+        {
+            nonFinalFeed.Task,
+            Task.CompletedTask,
+            "kontrollü timeout",
+            "ATTEMPT_1",
+            CancellationToken.None,
+            TimeSpan.FromMilliseconds(100)
+        });
+        bool timedOut = false;
+        try { nonFinal.GetAwaiter().GetResult(); }
+        catch (TimeoutException) { timedOut = true; }
+        Assert(timedOut, "İlk denemeye gereksiz geç yanıt toleransı uygulandı.");
+    }
+
+    private static void RunExpertDiagnosticsTest(string testRoot)
+    {
+        string logPath = Path.Combine(testRoot, "expert-diagnostics", "surumyakma.log");
+        Logger.Initialize(logPath);
+        Logger.Checkpoint("TEST_DIAGNOSTIC_STAGE", "FAILED", "controlled=true");
+        string report = ExpertDiagnostics.CaptureFailureAsync(
+            new ExpertDiagnosticContext
+            {
+                Stage = "NETWORK_TEZI_METADATA_REQUEST",
+                Ukb = "UKB1",
+                TargetIp = "192.168.11.1",
+                ServerIp = "192.168.11.221",
+                HttpPort = 8088,
+                SerialPort = "COM22",
+                BaudRate = 115200,
+                RelayBoxIp = "10.135.1.40",
+                PowerBoxIp = "10.135.1.60",
+                PowerOn = true,
+                RecoveryEnabled = true
+            },
+            new TimeoutException("Kontrollü metadata zaman aşımı"),
+            CancellationToken.None).GetAwaiter().GetResult();
+        Logger.Flush();
+        Assert(File.Exists(report), "Uzman tanı raporu oluşturulmadı.");
+        string text = File.ReadAllText(report);
+        Assert(text.Contains("NETWORK_TEZI_METADATA_REQUEST") &&
+               text.Contains("OLASI NEDEN / ÖNERİLEN KONTROL") &&
+               text.Contains("IPCONFIG_ALL") &&
+               text.Contains("OTURUM LOGU - SON CHECKPOINT"),
+            "Uzman tanı raporunun zorunlu bölümleri eksik.");
     }
 
     private static int CaptureEnglishDocumentationScreenshots(string outputDirectory)
@@ -370,8 +443,16 @@ internal static class Program
         PropertyInfo otgConfirmation = typeof(FlashWorkflow).GetProperty(
             "WaitForOtgCableConfirmationAsync",
             BindingFlags.Instance | BindingFlags.Public);
-        Assert(otgConfirmation?.PropertyType == typeof(Func<CancellationToken, Task>),
-            "OTG kullanici onayi bekleme noktasi bulunamadi.");
+        PropertyInfo otgDisconnect = typeof(FlashWorkflow).GetProperty(
+            "WaitForOtgDisconnectConfirmationAsync",
+            BindingFlags.Instance | BindingFlags.Public);
+        PropertyInfo otgReconnect = typeof(FlashWorkflow).GetProperty(
+            "WaitForOtgReconnectConfirmationAsync",
+            BindingFlags.Instance | BindingFlags.Public);
+        Assert(otgConfirmation?.PropertyType == typeof(Func<CancellationToken, Task>) &&
+               otgDisconnect?.PropertyType == typeof(Func<CancellationToken, Task>) &&
+               otgReconnect?.PropertyType == typeof(Func<CancellationToken, Task>),
+            "OTG cikarma ve yeniden takma kullanici onay noktalari bulunamadi.");
 
         MethodInfo linkCheck = typeof(Form1).GetMethod(
             "IsPhysicalEthernetLinkUp",
@@ -501,6 +582,19 @@ internal static class Program
         method.Invoke(null, new object[] { config });
         Assert(config.SelectedUkb == 1 && !config.ValidateTeziPackageNamePrefix,
             "Uygulama acilisinda UKB1 varsayilani veya kapali on-ad kontrolu uygulanmadi.");
+
+        MethodInfo resizeMethod = typeof(Form1).GetMethod(
+            "Form1_Resize",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Type programType = typeof(Form1).Assembly.GetType("SurumYakma.Program");
+        MethodInfo activateMethod = programType?.GetMethod(
+            "TryActivateRunningWindow",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert(Form1.MaximumShutdownWaitSeconds > 0 &&
+               Form1.MaximumShutdownWaitSeconds <= 30,
+            "Uygulama kapanisi sinirli bir ust sureye sahip degil.");
+        Assert(resizeMethod != null && activateMethod != null,
+            "Gorev cubugu gorunurlugu veya mevcut pencereyi geri getirme korumasi bulunamadi.");
     }
     private static void RunAdvancedSettingsTest()
     {
@@ -739,33 +833,13 @@ internal static class Program
 
     private static void RunSixTargetUsbNcmAddressTest()
     {
-        string[] expected =
-        {
-            "192.168.11.221",
-            "192.168.11.222",
-            "192.168.11.223",
-            "192.168.11.224",
-            "192.168.11.225",
-            "192.168.11.226"
-        };
         for (int target = 1; target <= 6; target++)
         {
             string actual = HardwareAutoConfigurator.GetTargetNetworkServerIp(
                 "192.168.11.221", target);
-            Assert(actual == expected[target - 1],
+            Assert(actual == "192.168.11.221",
                 $"UKB{target} USB-NCM PC adresi hatalı: {actual}");
         }
-
-        bool overflowRejected = false;
-        try
-        {
-            HardwareAutoConfigurator.GetTargetNetworkServerIp("192.168.11.252", 6);
-        }
-        catch (InvalidOperationException)
-        {
-            overflowRejected = true;
-        }
-        Assert(overflowRejected, "Altı UKB adres aralığı taşması reddedilmedi.");
     }
     private static void RunStaleUsbNcmAdapterRejectionTest()
     {
@@ -975,6 +1049,12 @@ internal static class Program
             form.Hide();
         }
         SaveHelpSnapshot(form, type);
+        type.GetMethod("ApplyShutdownVisualState", BindingFlags.Instance | BindingFlags.NonPublic)
+            .Invoke(form, null);
+        Assert(form.Enabled && !startButton.Enabled && !settings.Enabled &&
+               projectList.Enabled && versionList.Enabled &&
+               progressBar.Style == ProgressBarStyle.Marquee,
+            "Kapanista yalniz dugmeler solmuyor veya tum pencere gereksiz yere devre disi kaliyor.");
     }
 
     private static void RunEnglishUiSmokeTest()
@@ -1013,10 +1093,10 @@ internal static class Program
 
         status.Text = "Moxa cihazlarına bağlanılıyor...";
         start.Text = "UKB1 — SÜRÜM YÜKLEMEYİ BAŞLAT";
-        form.Text = "Sürüm Yükleme v-1.0.2";
+        form.Text = "Sürüm Yükleme v-1.0.3";
         projects.Items.Add("KSIMSEK (Varsayılan)");
 
-        Assert(form.Text == "Version Installation v-1.0.2" &&
+        Assert(form.Text == "Version Installation v-1.0.3" &&
                versionLabel.Text == "1. Version to Install" &&
                targetLabel.Text == "2. Target UKB" &&
                operationLabel.Text == "3. Installation" &&
@@ -1162,8 +1242,26 @@ internal static class Program
             "Power ON oncesi Recovery REAL kurulum suresi yetersiz.");
         Assert(FlashWorkflow.KnownUsbWarningSeconds >= 20,
             "Sahada olculen 15 saniyelik USB hazirlanma suresinden once OTG uyarisi verilmemeli.");
-        Assert(FlashWorkflow.KnownUsbRecoveryRetrySeconds > FlashWorkflow.KnownUsbWarningSeconds,
-            "Otomatik Recovery yeniden denemesi kullanici uyarisindan sonra olmali.");
+
+        events.Clear();
+        FlashWorkflow.ExecuteKnownUsbCleanRetrySequenceAsync(
+            (value, _) => { events.Add("POWER=" + value); return Task.CompletedTask; },
+            (value, _) => { events.Add("RECOVERY=" + value); return Task.CompletedTask; },
+            (duration, _) => { events.Add("DELAY=" + (int)duration.TotalMilliseconds); return Task.CompletedTask; },
+            _ => { events.Add("USER_DISCONNECT"); return Task.CompletedTask; },
+            _ => { events.Add("NORMAL_BOOT_VERIFIED"); return Task.CompletedTask; },
+            _ => { events.Add("USER_RECONNECT"); return Task.CompletedTask; },
+            _ => { events.Add("USB_RESCAN"); return Task.CompletedTask; },
+            CancellationToken.None).GetAwaiter().GetResult();
+        string[] cleanRetryExpected =
+        {
+            "POWER=0", "DELAY=3000", "RECOVERY=0", "DELAY=500",
+            "USER_DISCONNECT", "POWER=1", "NORMAL_BOOT_VERIFIED",
+            "POWER=0", "DELAY=3000", "RECOVERY=1", "DELAY=750",
+            "USER_RECONNECT", "POWER=1", "DELAY=500", "USB_RESCAN", "DELAY=1000"
+        };
+        Assert(events.SequenceEqual(cleanRetryExpected),
+            "Temiz OTG/UUU retry sirasi hatali: " + string.Join(",", events));
 
         events.Clear();
         FlashWorkflow.ExecuteRecoveryBootSequenceAsync(
@@ -1191,8 +1289,27 @@ internal static class Program
         MethodInfo reloadMethod = typeof(Form1).GetMethod(
             "ReloadEasyInstallerWithPublishedFeedAsync",
             BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert(retryMethod != null && reloadMethod != null,
-            "Seri kabuk retry veya onceden duyurulan feed yeniden yukleme korumasi bulunamadi.");
+        MethodInfo existingTeziMethod = typeof(Form1).GetMethod(
+            "TryUseExistingTeziDuringReloadAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo rebindMethod = typeof(Form1).GetMethod(
+            "RebindTeziServicesAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo metadataRefreshMethod = typeof(Form1).GetMethod(
+            "WaitForTeziMetadataWithRefreshAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        MethodInfo pnpIdentityMethod = typeof(HardwareAutoConfigurator).GetMethod(
+            "ReadPnpIdentity",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        MethodInfo hostPreflightMethod = typeof(HardwareAutoConfigurator).GetMethod(
+            "ValidateHostPreflight",
+            BindingFlags.Static | BindingFlags.Public);
+        Assert(retryMethod != null && reloadMethod != null &&
+               existingTeziMethod != null && rebindMethod != null &&
+               metadataRefreshMethod != null,
+            "Seri kabuk, mevcut TEZI feed yarisi veya servis yeniden baglama korumasi bulunamadi.");
+        Assert(pnpIdentityMethod != null && hostPreflightMethod != null,
+            "Kalici USB-NCM PnP eslemesi veya evrensel PC on kontrolu bulunamadi.");
     }
 
     private static void RunOtgWaitStateParsingTest()
@@ -1378,30 +1495,40 @@ internal static class Program
         using HttpResponseMessage feedResponse = client.GetAsync(server.BaseUrl + "/image_list.json")
             .GetAwaiter().GetResult();
         string feed = feedResponse.Content.ReadAsStringAsync().GetAwaiter().GetResult();
-        Assert(feed.Contains("package/image.json"), "TEZI image_list.json paket adresi hatalı.");
+        using (JsonDocument feedDocument = JsonDocument.Parse(feed))
+            Assert(feedDocument.RootElement.GetProperty("images")[0].GetString() ==
+                server.ImageMetadataReference,
+                "TEZI image_list.json resmî göreli metadata yolunu taşımıyor.");
         Assert(feedResponse.Headers.CacheControl != null &&
                feedResponse.Headers.CacheControl.NoStore &&
+               feedResponse.Headers.CacheControl.NoCache &&
                feedResponse.Headers.CacheControl.MaxAge == TimeSpan.Zero,
-            "TEZI JSON yanıtı resmi no-store,max-age=0 önbellek başlığını taşımıyor.");
+            "TEZI JSON yanıtı no-store,no-cache,max-age=0 önbellek başlığını taşımıyor.");
 
-        byte[] downloaded = client.GetByteArrayAsync(server.BaseUrl + "/package/payload.bin")
+        string metadata = client.GetStringAsync(server.ImageMetadataUrl)
+            .GetAwaiter().GetResult();
+        Assert(metadata.Contains("config_format"),
+            "Göreli feed yolunun işaret ettiği image.json sunulamadı.");
+
+        string payloadPath = server.PackagePathPrefix + "payload.bin";
+        byte[] downloaded = client.GetByteArrayAsync(server.BaseUrl + payloadPath)
             .GetAwaiter().GetResult();
         Assert(downloaded.SequenceEqual(payload), "HTTP paket dosyası değişmeden aktarılamadı.");
         SpinWait.SpinUntil(
-            () => completedRequests.Contains("/package/payload.bin"),
+            () => completedRequests.Contains(payloadPath),
             TimeSpan.FromSeconds(1));
-        Assert(startedRequests.Contains("/package/payload.bin"), "Payload başlangıç olayı üretilmedi.");
+        Assert(startedRequests.Contains(payloadPath), "Payload başlangıç olayı üretilmedi.");
         Assert(completedRequests.Contains("/image_list.json"), "Feed tamamlanma olayı üretilmedi.");
-        Assert(completedRequests.Contains("/package/payload.bin"), "Payload tamamlanma olayı üretilmedi.");
+        Assert(completedRequests.Contains(payloadPath), "Payload tamamlanma olayı üretilmedi.");
 
-        using var request = new HttpRequestMessage(HttpMethod.Get, server.BaseUrl + "/package/payload.bin");
+        using var request = new HttpRequestMessage(HttpMethod.Get, server.BaseUrl + payloadPath);
         request.Headers.Range = new RangeHeaderValue(4, 7);
         using HttpResponseMessage response = client.Send(request);
         byte[] range = response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult();
         Assert(response.StatusCode == HttpStatusCode.PartialContent, "HTTP range isteği 206 dönmedi.");
         Assert(Encoding.ASCII.GetString(range) == "4567", "HTTP range içeriği hatalı.");
 
-        HttpResponseMessage traversal = client.GetAsync(server.BaseUrl + "/package/%2e%2e/image.json")
+        HttpResponseMessage traversal = client.GetAsync(server.BaseUrl + server.PackagePathPrefix + "%2e%2e/image.json")
             .GetAwaiter().GetResult();
         Assert(traversal.StatusCode == HttpStatusCode.NotFound, "Dizin geçişi isteği engellenmedi.");
         traversal.Dispose();
@@ -1444,6 +1571,7 @@ internal static class Program
             "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\n");
         stalledClient.GetStream().Write(incompleteRequest, 0, incompleteRequest.Length);
         Thread.Sleep(75);
+        string firstMetadataReference = first.ImageMetadataReference;
         DateTime disposeStarted = DateTime.UtcNow;
         first.Dispose();
         Assert(DateTime.UtcNow - disposeStarted < TimeSpan.FromSeconds(3),
@@ -1456,7 +1584,8 @@ internal static class Program
             using var secondClient = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
             string response = secondClient.GetStringAsync(second.BaseUrl + "/image_list.json")
                 .GetAwaiter().GetResult();
-            Assert(response.Contains("package/image.json"),
+            Assert(response.Contains(second.ImageMetadataReference) &&
+                   !string.Equals(firstMetadataReference, second.ImageMetadataReference, StringComparison.Ordinal),
                 "İkinci UKB oturumu önceki HTTP portunu yeniden kullanamadı.");
         }
 
@@ -1536,17 +1665,18 @@ internal static class Program
                         .GetAwaiter().GetResult().Trim() == TeziHttpServer.HealthResponse,
                         session + " health kontrolü başarısız.");
 
+                    string metadataUrl;
                     using (JsonDocument feed = JsonDocument.Parse(
                         client.GetStringAsync(server.BaseUrl + "/image_list.json")
                             .GetAwaiter().GetResult()))
                     {
-                        Assert(feed.RootElement.GetProperty("images")[0].GetString() ==
-                               "package/image.json",
+                        metadataUrl = feed.RootElement.GetProperty("images")[0].GetString();
+                        Assert(metadataUrl == server.ImageMetadataReference,
                             session + " feed yolu hatalı.");
                     }
 
                     using (JsonDocument image = JsonDocument.Parse(
-                        client.GetStringAsync(server.BaseUrl + "/package/image.json")
+                        client.GetStringAsync(server.BaseUrl + "/" + metadataUrl)
                             .GetAwaiter().GetResult()))
                     {
                         JsonElement metadata = image.RootElement;
@@ -1561,7 +1691,7 @@ internal static class Program
                     }
 
                     using var rangeRequest = new HttpRequestMessage(
-                        HttpMethod.Get, server.BaseUrl + "/package/payload.bin");
+                        HttpMethod.Get, server.BaseUrl + server.PackagePathPrefix + "payload.bin");
                     rangeRequest.Headers.Range = new RangeHeaderValue(4096, 12287);
                     using HttpResponseMessage rangeResponse = client.Send(rangeRequest);
                     byte[] range = rangeResponse.Content.ReadAsByteArrayAsync()
@@ -1571,13 +1701,13 @@ internal static class Program
                         session + " range aktarımı başarısız.");
 
                     byte[] downloaded = client.GetByteArrayAsync(
-                        server.BaseUrl + "/package/payload.bin").GetAwaiter().GetResult();
+                        server.BaseUrl + server.PackagePathPrefix + "payload.bin").GetAwaiter().GetResult();
                     Assert(Convert.ToHexString(SHA256.HashData(downloaded)) == hash,
                         session + " tam payload SHA-256 doğrulaması başarısız.");
-                    Assert(client.GetStringAsync(server.BaseUrl + "/package/prepare.sh")
+                    Assert(client.GetStringAsync(server.BaseUrl + server.PackagePathPrefix + "prepare.sh")
                         .GetAwaiter().GetResult().Contains("exit 0"),
                         session + " prepare.sh alınamadı.");
-                    Assert(client.GetStringAsync(server.BaseUrl + "/package/wrapup.sh")
+                    Assert(client.GetStringAsync(server.BaseUrl + server.PackagePathPrefix + "wrapup.sh")
                         .GetAwaiter().GetResult().Contains("poweroff -f"),
                         session + " wrapup.sh alınamadı.");
                 }
@@ -1586,13 +1716,13 @@ internal static class Program
                 {
                     lock (eventSync)
                         return events.Contains("DONE:/image_list.json") &&
-                               events.Contains("DONE:/package/image.json") &&
-                               events.Contains("DONE:/package/payload.bin");
+                               events.Contains("DONE:" + server.ImageMetadataPath) &&
+                               events.Contains("DONE:" + server.PackagePathPrefix + "payload.bin");
                 }, TimeSpan.FromSeconds(2));
                 lock (eventSync)
                 {
-                    Assert(events.Contains("START:/package/payload.bin") &&
-                           events.Contains("DONE:/package/payload.bin"),
+                    Assert(events.Contains("START:" + server.PackagePathPrefix + "payload.bin") &&
+                           events.Contains("DONE:" + server.PackagePathPrefix + "payload.bin"),
                         session + " payload olay zinciri tamamlanmadı.");
                 }
 
@@ -1666,9 +1796,10 @@ internal static class Program
         string sourceJson = Path.Combine(source, "image.json");
         File.WriteAllText(
             sourceJson,
-            "{\n  \"name\": \"TUK 4.0.16.99\",\n  \"autoinstall\": false,\n" +
-            "  \"license\": \"license.html\",\n  \"license_title\": \"Lisans\"\n}\n");
+            "{\n  \"config_format\": 4,\n  \"name\": \"TUK 4.0.16.99\",\n  \"autoinstall\": false,\n" +
+            "  \"filelist\": [\"payload.bin\"],\n  \"license\": \"license.html\",\n  \"license_title\": \"Lisans\"\n}\n");
         File.WriteAllText(Path.Combine(source, "license.html"), "örnek lisans");
+        File.WriteAllBytes(Path.Combine(source, "payload.bin"), new byte[] { 1, 2, 3, 4 });
 
         string stagingRoot = Path.Combine(testRoot, "network-staging");
         string prepared = new VersionManager(new AppConfig())

@@ -27,6 +27,7 @@ namespace SurumYakma
         private readonly object _sync = new object();
         private readonly object _clientTasksSync = new object();
         private readonly HashSet<Task> _clientTasks = new HashSet<Task>();
+        private readonly string _feedToken = Guid.NewGuid().ToString("N");
         private TcpListener _listener;
         private CancellationTokenSource _cancellation;
         private Task _acceptTask;
@@ -56,6 +57,14 @@ namespace SurumYakma
         }
 
         public string BaseUrl => $"http://{_bindAddress}:{Port}";
+
+        public string PackagePathPrefix => "/package-" + _feedToken + "/";
+
+        public string ImageMetadataReference => PackagePathPrefix.TrimStart('/') + "image.json";
+
+        public string ImageMetadataPath => "/" + ImageMetadataReference;
+
+        public string ImageMetadataUrl => BaseUrl + ImageMetadataPath;
 
         public static TeziHttpServer StartWithFallback(
             string bindIp,
@@ -251,18 +260,29 @@ namespace SurumYakma
                     return;
                 }
 
+                // Resmi Toradex bicimindeki sorgusuz goreli yolu kullan. Oturuma
+                // ozel dizin, Easy Installer'in eski /package/image.json sonucunu
+                // onbellekten yeniden kullanmasini engeller.
                 string json = JsonSerializer.Serialize(
-                    new { config_format = 1, images = new[] { "package/image.json" } },
+                    new { config_format = 1, images = new[] { ImageMetadataReference } },
                     new JsonSerializerOptions { WriteIndented = true }) + "\n";
                 await WriteBytesAsync(
                     stream, 200, "OK", "application/json; charset=utf-8",
                     Encoding.UTF8.GetBytes(json), headOnly, ct);
-                Logger.Checkpoint("TEZI_HTTP_REQUEST", "OK", $"remote={remote}; method={method}; path=/image_list.json; status=200");
+                Logger.Checkpoint(
+                    "TEZI_HTTP_REQUEST",
+                    "OK",
+                    $"remote={remote}; method={method}; path=/image_list.json; status=200; " +
+                    $"metadataUrlMode=relative-session-directory; metadata={ImageMetadataReference}; feedSession={_feedToken}");
                 PublishRequestCompleted("/image_list.json");
                 return;
             }
 
-            if (!path.StartsWith("/package/", StringComparison.OrdinalIgnoreCase))
+            string packagePrefix = PackagePathPrefix;
+            const string legacyPackagePrefix = "/package/";
+            bool currentPackagePath = path.StartsWith(packagePrefix, StringComparison.OrdinalIgnoreCase);
+            bool legacyPackagePath = path.StartsWith(legacyPackagePrefix, StringComparison.OrdinalIgnoreCase);
+            if (!currentPackagePath && !legacyPackagePath)
             {
                 await WriteTextAsync(stream, 404, "Not Found", "Bulunamadı.\n", headOnly, ct);
                 Logger.Checkpoint("TEZI_HTTP_REQUEST", "FAILED", $"remote={remote}; path={path}; status=404");
@@ -279,7 +299,8 @@ namespace SurumYakma
                 return;
             }
 
-            string relative = Uri.UnescapeDataString(path.Substring("/package/".Length))
+            string matchedPrefix = currentPackagePath ? packagePrefix : legacyPackagePrefix;
+            string relative = Uri.UnescapeDataString(path.Substring(matchedPrefix.Length))
                 .Replace('/', Path.DirectorySeparatorChar);
             string fullPath = Path.GetFullPath(Path.Combine(root, relative));
             string rootPrefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
@@ -290,7 +311,7 @@ namespace SurumYakma
                 return;
             }
 
-            string publishedPath = "/package/" + relative.Replace(Path.DirectorySeparatorChar, '/');
+            string publishedPath = matchedPrefix + relative.Replace(Path.DirectorySeparatorChar, '/');
             PublishRequestStarted(publishedPath);
             Logger.Checkpoint(
                 "TEZI_HTTP_FILE",
@@ -446,7 +467,9 @@ namespace SurumYakma
                 $"Content-Type: {contentType}\r\n" +
                 $"Content-Length: {contentLength.ToString(CultureInfo.InvariantCulture)}\r\n" +
                 "Connection: close\r\n" +
-                "Cache-Control: no-store,max-age=0\r\n" +
+                "Cache-Control: no-store, no-cache, must-revalidate, max-age=0\r\n" +
+                "Pragma: no-cache\r\n" +
+                "Expires: 0\r\n" +
                 extraHeaders + "\r\n";
             byte[] bytes = Encoding.ASCII.GetBytes(header);
             await stream.WriteAsync(bytes.AsMemory(), ct);

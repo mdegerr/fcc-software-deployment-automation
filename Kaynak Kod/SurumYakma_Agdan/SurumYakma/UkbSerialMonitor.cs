@@ -34,6 +34,7 @@ namespace SurumYakma
         private int ActiveBaudRate => _cfg.GetSerialBaudRate(_cfg.SelectedUkb == 2);
         private readonly object _sync = new object();
         private readonly object _writeSync = new object();
+        public bool LastShellProbeRejectedByCommandParser { get; private set; }
         private readonly StringBuilder _pendingLine = new StringBuilder();
         private readonly List<SerialLine> _history = new List<SerialLine>();
         private readonly List<LineWaiter> _waiters = new List<LineWaiter>();
@@ -170,6 +171,29 @@ namespace SurumYakma
             return false;
         }
 
+        public Task<string> WaitForNormalBootEvidenceAsync(
+            long afterSequence,
+            TimeSpan timeout,
+            CancellationToken ct)
+        {
+            return WaitForMatchAsync(
+                afterSequence,
+                line =>
+                {
+                    string version = ExtractOfpVersion(line);
+                    if (version != null)
+                        return "OFP Version " + version;
+                    return line.IndexOf(
+                        "Started ofp application",
+                        StringComparison.OrdinalIgnoreCase) >= 0
+                        ? line.Trim()
+                        : null;
+                },
+                timeout,
+                "OTG'siz normal UKB açılışı",
+                ct);
+        }
+
         public Task<string> WaitForRecoveryReadyAsync(long afterSequence, CancellationToken ct)
         {
             return WaitForMatchAsync(
@@ -207,6 +231,7 @@ namespace SurumYakma
             if (!IsOpen)
                 return false;
 
+            LastShellProbeRejectedByCommandParser = false;
             string token = Guid.NewGuid().ToString("N");
             string marker = "__SURUMYAKMA_SHELL_OK_" + token + "__";
             long mark = Mark();
@@ -216,12 +241,22 @@ namespace SurumYakma
             Logger.Checkpoint("TEZI_SERIAL_SHELL_PROBE", "COMMAND_SENT", "timeoutSec=3");
             try
             {
-                await WaitForMatchAsync(
+                string result = await WaitForMatchAsync(
                     mark,
-                    line => line.Trim().Equals(marker, StringComparison.Ordinal) ? marker : null,
+                    line => line.Trim().Equals(marker, StringComparison.Ordinal) ? marker :
+                            line.IndexOf("ERR FORMAT", StringComparison.OrdinalIgnoreCase) >= 0 ? "ERR_FORMAT" : null,
                     TimeSpan.FromSeconds(3),
                     "Easy Installer etkileşimli seri kabuk doğrulaması",
                     ct);
+                if (result == "ERR_FORMAT")
+                {
+                    LastShellProbeRejectedByCommandParser = true;
+                    Logger.Checkpoint(
+                        "TEZI_SERIAL_SHELL_PROBE",
+                        "UNSUPPORTED",
+                        "response=ERR_FORMAT; action=stop-probe-retries-and-use-official-zeroconf");
+                    return false;
+                }
                 Logger.Checkpoint("TEZI_SERIAL_SHELL_PROBE", "SUCCESS");
                 return true;
             }
@@ -258,6 +293,40 @@ namespace SurumYakma
                 TimeSpan.FromSeconds(_cfg.SerialBootTimeoutSeconds),
                 "normal açılıştaki OFP Version mesajı",
                 ct);
+        }
+
+        public Task<string> WaitForActivityAsync(
+            long afterSequence,
+            TimeSpan timeout,
+            CancellationToken ct)
+        {
+            return WaitForMatchAsync(
+                afterSequence,
+                line => string.IsNullOrWhiteSpace(line) ? null : line,
+                timeout,
+                "normal acilis seri konsol verisi",
+                ct);
+        }
+
+        public bool TryGetPhysicalEthernetFailureSince(long afterSequence, out string evidence)
+        {
+            lock (_sync)
+            {
+                SerialLine failure = _history
+                    .Where(item => item.Sequence > afterSequence)
+                    .LastOrDefault(item =>
+                        item.Text.IndexOf("eth0", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        (item.Text.IndexOf("Unable to connect to phy", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         item.Text.IndexOf("Link is Down", StringComparison.OrdinalIgnoreCase) >= 0));
+                if (failure != null)
+                {
+                    evidence = failure.Text.Trim();
+                    return true;
+                }
+            }
+
+            evidence = null;
+            return false;
         }
 
         public Task<string> WaitForNetworkUpAsync(

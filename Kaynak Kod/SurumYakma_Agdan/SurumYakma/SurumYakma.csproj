@@ -8,14 +8,14 @@
     <PlatformTarget>x86</PlatformTarget>
     <Platforms>x86</Platforms>
     <RuntimeIdentifier>win-x86</RuntimeIdentifier>
-    <AssemblyName>Sürüm Yükleme v-1.0.2</AssemblyName>
+    <AssemblyName>Sürüm Yükleme v-1.0.3</AssemblyName>
     <RootNamespace>SurumYakma</RootNamespace>
-    <Title>Sürüm Yükleme v-1.0.2</Title>
-    <Product>Sürüm Yükleme v-1.0.2</Product>
+    <Title>Sürüm Yükleme v-1.0.3</Title>
+    <Product>Sürüm Yükleme v-1.0.3</Product>
     <Description>UKB ağdan sürüm yükleme uygulaması</Description>
-    <Version>1.0.2</Version>
-    <AssemblyVersion>1.0.2.0</AssemblyVersion>
-    <FileVersion>1.0.2.0</FileVersion>
+    <Version>1.0.3</Version>
+    <AssemblyVersion>1.0.3.0</AssemblyVersion>
+    <FileVersion>1.0.3.0</FileVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <ApplicationIcon>Assets\surum-yukleme.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>

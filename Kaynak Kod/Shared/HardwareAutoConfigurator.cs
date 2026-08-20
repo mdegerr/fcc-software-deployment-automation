@@ -17,6 +17,9 @@ namespace SurumYakma
     {
         private static readonly object ManagedRouteSync = new();
         private static readonly HashSet<int> ManagedRouteInterfaceIndexes = new();
+        private static readonly object AdapterIdentitySync = new();
+        private static readonly Dictionary<string, string> PreferredAdapterByAddress =
+            new(StringComparer.OrdinalIgnoreCase);
         public static string ApplyStartupDetection(
             AppConfig config,
             string projectName,
@@ -165,11 +168,69 @@ namespace SurumYakma
 
         public static HashSet<string> GetNetworkInterfaceIds()
         {
-            return new HashSet<string>(
-                NetworkInterface.GetAllNetworkInterfaces()
-                    .Where(adapter => adapter.OperationalStatus == OperationalStatus.Up)
-                    .Select(adapter => adapter.Id),
-                StringComparer.OrdinalIgnoreCase);
+            var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces()
+                         .Where(item => item.OperationalStatus == OperationalStatus.Up))
+            {
+                result.Add(adapter.Id);
+                result.Add("PNP:" + GetPersistentAdapterIdentity(adapter));
+            }
+            return result;
+        }
+
+        public static void ValidateHostPreflight(AppConfig config, bool whichUkb)
+        {
+            if (config == null) throw new ArgumentNullException(nameof(config));
+
+            using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+            var principal = new WindowsPrincipal(identity);
+            bool isAdministrator = principal.IsInRole(WindowsBuiltInRole.Administrator);
+            int targetNumber = config.GetTargetNumber(whichUkb);
+            string serverAddress = config.AutoDetectNetworkServerIp
+                ? GetTargetNetworkServerIp(config.NetworkServerIp, targetNumber)
+                : config.NetworkServerIp;
+            string serialPort = config.GetSerialPort(whichUkb);
+            string[] availablePorts = GetAvailableSerialPorts();
+            bool serialPresent = !string.IsNullOrWhiteSpace(serialPort) &&
+                availablePorts.Contains(serialPort, StringComparer.OrdinalIgnoreCase);
+
+            Logger.Checkpoint(
+                "HOST_PREFLIGHT_ENVIRONMENT",
+                isAdministrator ? "SUCCESS" : "FAILED",
+                $"os={Environment.OSVersion}; os64={Environment.Is64BitOperatingSystem}; " +
+                $"process64={Environment.Is64BitProcess}; administrator={isAdministrator}; ukb=UKB{targetNumber}");
+            if (!isAdministrator)
+                throw new InvalidOperationException(
+                    "USB-NCM ağı ve Windows güvenlik duvarını hazırlamak için uygulamayı yönetici olarak çalıştırın.");
+
+            if (!IPAddress.TryParse(config.UkbTargetIp, out IPAddress targetIp) ||
+                targetIp.AddressFamily != AddressFamily.InterNetwork ||
+                !IPAddress.TryParse(serverAddress, out IPAddress serverIp) ||
+                serverIp.AddressFamily != AddressFamily.InterNetwork)
+                throw new InvalidOperationException(
+                    $"Easy Installer IPv4 ayarları geçersiz. UKB={config.UkbTargetIp}; PC={serverAddress}.");
+            byte[] targetBytes = targetIp.GetAddressBytes();
+            byte[] serverBytes = serverIp.GetAddressBytes();
+            bool sameSubnet24 = targetBytes[0] == serverBytes[0] &&
+                targetBytes[1] == serverBytes[1] && targetBytes[2] == serverBytes[2];
+            if (targetIp.Equals(serverIp) || !sameSubnet24)
+                throw new InvalidOperationException(
+                    $"UKB ve PC USB-NCM adresleri aynı /24 ağında ve birbirinden farklı olmalıdır. " +
+                    $"UKB={targetIp}; PC={serverIp}.");
+            if (config.NetworkServerPort < 1 || config.NetworkServerPort > 65535)
+                throw new InvalidOperationException(
+                    "HTTP portu 1-65535 aralığında olmalıdır: " + config.NetworkServerPort);
+
+            Logger.Checkpoint(
+                "HOST_PREFLIGHT_NETWORK",
+                "SUCCESS",
+                $"ukb=UKB{targetNumber}; target={targetIp}; server={serverIp}; " +
+                $"httpPort={config.NetworkServerPort}; subnet=/24");
+            Logger.Checkpoint(
+                "HOST_PREFLIGHT_SERIAL",
+                serialPresent ? "SUCCESS" : "WARNING",
+                $"ukb=UKB{targetNumber}; configured={serialPort}; present={serialPresent}; " +
+                "available=" + (availablePorts.Length == 0 ? "none" : string.Join(",", availablePorts)));
         }
 
         public static Task<string> EnsureNetworkServerIpAsync(
@@ -244,6 +305,9 @@ namespace SurumYakma
                         "SELECTED",
                         $"ukb=UKB{targetNumber}; {detail}; id={candidate.Id}; ifIndex={interfaceIndex}; address={desiredAddress}");
 
+                    await ReleaseAddressFromOtherUsbNcmAdaptersAsync(
+                        candidate.Id, desiredAddress, ct);
+
                     if (!InterfaceOwnsAddress(candidate.Id, desiredAddress, out _))
                     {
                         Logger.Checkpoint(
@@ -264,6 +328,12 @@ namespace SurumYakma
                         desiredAddress, candidate, targetNumber, ct);
                     await EnsureSelectedTargetRouteAsync(
                         config.UkbTargetIp, candidate, targetNumber, ct);
+                    lock (AdapterIdentitySync)
+                        PreferredAdapterByAddress[desiredAddress] = GetPersistentAdapterIdentity(candidate);
+                    Logger.Checkpoint(
+                        "USB_NCM_ADAPTER_IDENTITY",
+                        "SAVED",
+                        $"ukb=UKB{targetNumber}; address={desiredAddress}; pnp={GetPersistentAdapterIdentity(candidate)}");
                     return assigned;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
@@ -291,13 +361,9 @@ namespace SurumYakma
                 parsed.AddressFamily != AddressFamily.InterNetwork)
                 throw new InvalidOperationException("Geçersiz USB-NCM PC IPv4 adresi: " + baseAddress);
 
-            byte[] bytes = parsed.GetAddressBytes();
-            int host = bytes[3] + targetNumber - 1;
-            if (host < 2 || host > 254)
-                throw new InvalidOperationException(
-                    $"UKB1-UKB6 için ayrılacak PC adresleri IPv4 aralığını aşıyor. Başlangıç adresi={baseAddress}; hedef=UKB{targetNumber}.");
-            bytes[3] = (byte)host;
-            return new IPAddress(bytes).ToString();
+            // Yüklemeler paralel değil, sıralıdır. Sahada doğrulanmış USB-NCM PC
+            // adresini her UKB için yeniden kullanmak eski TEZI sürümleriyle uyumludur.
+            return parsed.ToString();
         }
 
         public static string ResolveNetworkServerIp(AppConfig config)
@@ -343,7 +409,7 @@ namespace SurumYakma
                 .Where(IsEligibleUsbNcmCandidate)
                 .ToList();
             var newAdapters = eligible
-                .Where(adapter => before == null || !before.Contains(adapter.Id))
+                .Where(adapter => !WasPresentBefore(before, adapter))
                 .ToList();
 
             NetworkInterface candidate = newAdapters.FirstOrDefault(adapter =>
@@ -374,10 +440,32 @@ namespace SurumYakma
                 return sameTargetOwner;
             }
 
+            string preferredIdentity = null;
+            lock (AdapterIdentitySync)
+                PreferredAdapterByAddress.TryGetValue(desiredAddress, out preferredIdentity);
+            NetworkInterface preferred = string.IsNullOrWhiteSpace(preferredIdentity)
+                ? null
+                : eligible.FirstOrDefault(adapter => string.Equals(
+                    GetPersistentAdapterIdentity(adapter),
+                    preferredIdentity,
+                    StringComparison.OrdinalIgnoreCase));
+            if (preferred != null)
+            {
+                candidateIsNew = false;
+                bool isUsb = IsUsbNcmName(preferred.Name + " " + preferred.Description);
+                detail = $"adapter={preferred.Name}; description={preferred.Description}; new=false; " +
+                    $"usbLike={isUsb}; eligible={eligible.Count}; reuse=persistent-pnp-identity; " +
+                    "policy=new-or-same-target-owner-or-persistent-identity";
+                return preferred;
+            }
+
             detail = $"candidate=none; eligible={eligible.Count}; new={newAdapters.Count}; " +
-                "sameTargetOwner=none; policy=new-or-same-target-owner";
+                "sameTargetOwner=none; preferredIdentity=none; " +
+                "policy=new-or-same-target-owner-or-persistent-identity";
             return null;
-        }        private static bool IsEligibleUsbNcmCandidate(NetworkInterface adapter)
+        }
+
+        private static bool IsEligibleUsbNcmCandidate(NetworkInterface adapter)
         {
             if (adapter.OperationalStatus != OperationalStatus.Up) return false;
             if (adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
@@ -431,6 +519,29 @@ namespace SurumYakma
             {
                 return -1;
             }
+        }
+
+        private static string GetPersistentAdapterIdentity(NetworkInterface adapter)
+        {
+            try { return ReadPnpIdentity(adapter); } catch { }
+            return adapter.Id;
+        }
+
+        private static bool WasPresentBefore(ISet<string> before, NetworkInterface adapter)
+        {
+            return before != null &&
+                (before.Contains(adapter.Id) ||
+                 before.Contains("PNP:" + GetPersistentAdapterIdentity(adapter)));
+        }
+
+        private static string ReadPnpIdentity(NetworkInterface adapter)
+        {
+            const string networkClassId = "{4D36E972-E325-11CE-BFC1-08002BE10318}";
+            string connectionPath = "SYSTEM\\CurrentControlSet\\Control\\Network\\" +
+                networkClassId + "\\" + adapter.Id + "\\Connection";
+            using RegistryKey connectionKey = Registry.LocalMachine.OpenSubKey(connectionPath);
+            string pnpInstanceId = connectionKey?.GetValue("PnpInstanceID") as string;
+            return string.IsNullOrWhiteSpace(pnpInstanceId) ? adapter.Id : pnpInstanceId.Trim();
         }
 
         private static bool IsUsbNcmName(string value)
@@ -619,6 +730,28 @@ namespace SurumYakma
                 throw new InvalidOperationException(
                     "Seçili UKB için Windows hedef rotası oluşturulamadı. " + error.Trim());
         }
+        private static async Task ReleaseAddressFromOtherUsbNcmAdaptersAsync(
+            string selectedId, string address, CancellationToken ct)
+        {
+            foreach (NetworkInterface adapter in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (string.Equals(adapter.Id, selectedId, StringComparison.OrdinalIgnoreCase) ||
+                    !IsUsbNcmName(adapter.Name + " " + adapter.Description) ||
+                    !InterfaceOwnsAddress(adapter.Id, address, out _))
+                    continue;
+
+                await RunNetworkCommandAsync("netsh.exe", new[]
+                {
+                    "interface", "ipv4", "delete", "address",
+                    "name=" + adapter.Name, "address=" + address
+                }, ct, false, "USB_NCM_SHARED_ADDRESS_RELEASE");
+                await Task.Delay(300, ct);
+                if (InterfaceOwnsAddress(adapter.Id, address, out _))
+                    throw new InvalidOperationException(
+                        "Ortak USB-NCM adresi önceki adaptörden bırakılamadı: " + adapter.Name);
+            }
+        }
+
         private static async Task AssignStaticIpv4Async(
             string interfaceName, string address, CancellationToken ct)
         {
