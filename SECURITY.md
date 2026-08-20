@@ -1,22 +1,22 @@
-# Güvenlik Politikası
+# Security Policy
 
-## Kapsam
+## Scope
 
-Bu proje UKB güç, Recovery, seri bağlantı, USB-NCM ağı ve hedef yazılım yükleme işlemlerine müdahale eder. Güvenlik veya emniyet etkisi bulunan bulgular herkese açık issue içinde ayrıntılı saha verisi paylaşılmadan proje sahibiyle özel kanaldan iletilmelidir.
+This project controls Flight Control Computer (FCC) power, recovery state, serial communication, USB-NCM networking, and target software installation. Findings with security or safety implications must be reported privately to the repository owner without exposing field data in a public issue.
 
-## Paylaşılmaması gereken içerikler
+## Information that must not be shared
 
-- gerçek OFP/TEZI yazılım paketleri,
-- kullanıcı adı ve parolalar,
-- saha `Settings.json` dosyaları,
-- kurum içi IP/kanal eşlemeleri,
-- cihaz seri numarası ve tanımlayıcıları,
-- ayrıntılı saha logları.
+- real OFP or TEZI software packages,
+- usernames, passwords, or device credentials,
+- field `Settings.json` files,
+- organization-specific IP, slot, or channel mappings,
+- device serial numbers and identifiers,
+- detailed field logs.
 
-## Desteklenen sürüm
+## Supported release
 
-Güvenlik ve saha güvenilirliği düzeltmeleri güncel kararlı Release üzerinde yapılır. Eski sürümlerde görülen problem önce güncel sürümle tekrar doğrulanmalıdır.
+Security and field-reliability fixes are applied to the current stable release. Problems found in historical versions should first be reproduced with the current release where operationally safe.
 
-## Emniyet ilkesi
+## Safety principle
 
-Doğrulanmamış paketle, bilinmeyen kanal eşlemesiyle veya yetkisiz hedef donanım üzerinde yükleme başlatılmamalıdır. Kritik aşamada güç kesilmesi hedef yazılımı kullanılamaz duruma getirebilir.
+Do not start an installation with an unverified package, unknown channel mapping, or unauthorized target. Interrupting power during a critical installation stage may leave the target software unavailable.

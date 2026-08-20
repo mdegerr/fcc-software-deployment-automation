@@ -1,160 +1,181 @@
-# UKB Software Deployment & Recovery Automation
+# Flight Control Computer Software Deployment Automation
 
-**UKB uçuş kontrol bilgisayarlarına doğrulanmış TEZI yazılım paketlerini güvenli, tekrarlanabilir ve izlenebilir biçimde dağıtan Windows saha otomasyon platformu.**
+**A Windows-based field engineering application that automates secure, repeatable, and traceable software deployment to Flight Control Computers (FCCs) used in aircraft Systems Integration Laboratory (SIL) and Hardware-in-the-Loop (HIL) test environments.**
 
-Uygulama; Moxa Power/Recovery kontrolünü, seri konsol doğrulamasını, USB-NCM ağ hazırlığını, yerel TEZI paket sunumunu, kurulum takibini ve kurulum sonrası OFP sürüm kontrolünü tek bir denetlenebilir işlem akışında birleştirir.
+The application coordinates Moxa-based power and recovery control, serial-console supervision, Toradex recovery boot, USB-NCM network preparation, local TEZI package delivery, installation monitoring, reboot sequencing, and post-install Operational Flight Program (OFP) verification in one controlled workflow.
 
-## Öne çıkan yetkinlikler
+## Why this project matters
 
-| Yetkinlik | Kullanıcıya sağladığı değer |
+Aircraft integration laboratories combine real avionics hardware, power distribution, cable harnesses, sensors, simulated aircraft signals, and software models to validate system behavior before flight. Updating an FCC in such an environment can require several independent tools and manual hardware actions. This project turns that fragmented procedure into a single operator-guided deployment process.
+
+| Capability | Operational value |
 |---|---|
-| Uçtan uca iş akışı | Birden fazla araç ve manuel adımı tek arayüzden, doğru sırayla yönetir. |
-| Donanım orkestrasyonu | Seçili UKB’nin Power ve Recovery kanallarını Moxa üzerinden kontrol eder ve geri okuyarak doğrular. |
-| Dinamik hedef profilleri | UKB1–UKB6 için COM, güç ve Recovery eşleştirmelerini merkezi yapılandırmada saklar. |
-| Güvenli paket dağıtımı | TEZI paket yapısını doğrular, Easy Installer ortamını hazırlar ve yalnızca seçilen hedefe aktarım yapar. |
-| Saha taşınabilirliği | Windows 10/11 bilgisayarlarda değişen COM ve USB-NCM koşullarına uyarlanabilen profil tabanlı yapı sunar. |
-| Operasyonel izlenebilirlik | Her kritik adımı zaman damgalı loglar ve checkpoint kayıtlarıyla takip edilebilir hâle getirir. |
-| Kontrollü hata yönetimi | Zaman aşımı, tekrar deneme, kullanıcı yönlendirmesi, iptal ve güvenli kapatma mekanizmaları sağlar. |
+| End-to-end workflow orchestration | Executes hardware and software steps in the required order from one interface. |
+| Hardware-aware control | Operates only the selected FCC power and recovery channels and verifies each write by reading it back. |
+| Multi-target profiles | Stores COM, power, and recovery mappings for FCC1 through FCC6 in a centralized configuration. |
+| Validated package deployment | Validates the TEZI package structure before exposing it to the installer. |
+| Portable field operation | Adapts to Windows 10/11 systems with different COM and USB-NCM device assignments. |
+| Traceable execution | Records timestamped logs and checkpoints for every critical stage. |
+| Controlled failure handling | Provides timeouts, retries, operator guidance, cancellation, and safe shutdown behavior. |
 
 > [!IMPORTANT]
-> Bu yazılım güç, Recovery ve hedef yazılım yükleme adımlarına doğrudan müdahale eder. Yalnızca yetkili personel tarafından, doğrulanmış UKB hedefi ve onaylı TEZI paketiyle kullanılmalıdır.
+> This software directly controls power, recovery state, and target software installation. It must only be used by authorized personnel with a verified FCC target, approved channel mappings, and an approved TEZI package.
 
-## Güncel sürüm
+## Current release
 
-Kararlı sürüm: **v1.0.3**
+Stable release: **v1.0.3**
 
-- [Uygulamayı GitHub Releases üzerinden indir](https://github.com/mdegerr/ukb-software-deployment/releases/tag/v1.0.3)
-- [Sürüm notlarını incele](SURUM_NOTLARI.md)
+- [Download the field package from GitHub Releases](https://github.com/mdegerr/fcc-software-deployment-automation/releases/tag/v1.0.3)
+- [View release notes](RELEASE_NOTES.md)
 
-## Projenin amacı
+## Operational context and terminology
 
-Manuel sürüm yükleme sürecinde operatörün ayrı ayrı gerçekleştirdiği aşağıdaki işlemleri standartlaştırmak ve mümkün olduğu ölçüde otonomlaştırmak amaçlanmıştır:
+- **Flight Control Computer (FCC):** The target airborne computer receiving the approved software package.
+- **Aircraft Systems Integration Laboratory (SIL):** The ground-based integration environment containing real avionics, electrical interfaces, harnesses, sensors, simulation systems, and test equipment.
+- **Hardware-in-the-Loop (HIL):** The test method in which real FCC hardware interacts with simulated aircraft and sensor behavior in real time.
+- **Avionics integration bench/rig:** A smaller test setup focused on a specific avionics subsystem or integration scope.
 
-1. Çalışılan platformun ve yüklenebilir sürüm paketlerinin belirlenmesi.
-2. Seçilen UKB’ye ait COM, Power ve Recovery eşleştirmelerinin kullanılması.
-3. Moxa üzerinden UKB gücünün ve Recovery durumunun güvenli sırayla yönetilmesi.
-4. Toradex Easy Installer ortamının USB üzerinden başlatılması.
-5. Windows ile UKB arasında USB-NCM sanal ağının hazırlanması.
-6. TEZI paketinin yerel HTTP sunucusu ve DNS-SD/mDNS duyurusu ile Easy Installer’a sunulması.
-7. Kurulum talebinin, paket aktarımının ve hedef kapanışının izlenmesi.
-8. Recovery’nin NORMAL durumuna alınması ve UKB’nin yeniden başlatılması.
-9. Seri konsoldan yüklenen OFP sürümünün ve fiziksel Ethernet Link Up bilgisinin doğrulanması.
-10. Her kritik adımın zaman damgalı log ve checkpoint kayıtlarıyla izlenebilir hâle getirilmesi.
+This repository uses **SIL/HIL** terminology rather than organization-specific laboratory names. “Iron Bird” is intentionally not used as a generic term because it normally refers to a larger physical test rig containing representative aircraft electrical, hydraulic, and flight-control components.
 
-## Uygulamanın müdahale ettiği alanlar
+Reference terminology: [NASA Research Aircraft Integration Facility](https://www.nasa.gov/directorates/armd/iasp/fdc/research-aircraft-integration-facility-capabilities/) and [NASA Flight Simulation Facilities](https://www.nasa.gov/setmo/facilities/flight-simulation-facilities/).
 
-| Alan | Yapılan işlem |
+## Manual process replaced by the application
+
+A conventional deployment may require an operator to:
+
+1. Copy the approved software package to removable media.
+2. Set the FCC power and recovery channels using separate hardware-control software.
+3. Launch the recovery procedure and place the FCC in its installer environment.
+4. Move the removable media to the FCC.
+5. Connect to the installer interface using a remote-viewer application.
+6. Select and start the software installation manually.
+7. Return recovery to normal, reboot the FCC, and verify the installed OFP version.
+
+The current network-based workflow automates or supervises these operations without requiring the operator to interact with the installer desktop.
+
+## Automated deployment workflow
+
+1. Resolve the selected platform profile and FCC target.
+2. Validate the selected TEZI package.
+3. Verify Moxa Power Box and Relay Box communication.
+4. Place only the selected FCC in the required power and recovery state.
+5. Start the Toradex Easy Installer recovery environment through USB/UUU.
+6. Detect and configure the USB-NCM network interface.
+7. Publish the TEZI package through a session-local HTTP server and DNS-SD/mDNS announcement.
+8. Monitor installer requests, package transfer evidence, and target shutdown.
+9. Return Recovery to NORMAL and restart the FCC.
+10. Verify the expected OFP version and physical Ethernet Link Up evidence.
+11. Record the result and cleanup status in the session log.
+
+## Controlled interfaces
+
+| Interface | Application responsibility |
 |---|---|
-| Moxa Power Box | Yalnızca seçili UKB profiline ait güç kanalını okur, değiştirir ve geri okuyarak doğrular. |
-| Moxa Relay Box | Yalnızca seçili UKB profiline ait Recovery kanalını REAL/NORMAL durumuna getirir ve doğrular. |
-| Seri port | Seçili COM portundan UKB/Easy Installer çıktısını izler; gerekli Easy Installer kontrollerinde sınırlı komut gönderir. |
-| USB/OTG | Toradex UUU recovery aracını kullanarak Easy Installer ortamını hedefte başlatır. |
-| USB-NCM adaptörü | Hedef UKB için oluşturulan sanal ağ adaptörünü belirler, gerekli IPv4 adresini ve hedef rotasını hazırlar. |
-| Yerel ağ servisleri | Yalnızca yükleme süresince TEZI paketi için yerel HTTP ve DNS-SD/mDNS servisi çalıştırır. |
-| Geçici dosyalar | Paket hazırlığını kullanıcı profilindeki uygulamaya özel geçici çalışma alanında yapar; kaynak paketi değiştirmez. |
-| UKB yazılımı | Onaylanan TEZI paketini Easy Installer üzerinden hedef depolama alanına kurar. |
-| Loglar | Kullanıcı arayüzündeki özetin yanında ayrıntılı oturum ve checkpoint kayıtları oluşturur. |
+| Moxa Power Box | Reads, writes, and verifies only the selected FCC power channel. |
+| Moxa Relay Box | Sets the selected FCC recovery channel to REAL or NORMAL and verifies the result. |
+| Serial port | Monitors FCC and Easy Installer output and sends only limited installer-control commands where required. |
+| USB/OTG and UUU | Starts the Toradex Easy Installer recovery environment on the target. |
+| USB-NCM adapter | Identifies the session adapter and prepares the required IPv4 address and target route. |
+| Local HTTP service | Exposes only the validated TEZI staging package during the active installation session. |
+| DNS-SD/mDNS | Announces the session-local installer feed. |
+| Temporary workspace | Prepares package data in an application-specific temporary directory without modifying the source package. |
+| Session logs | Stores operator-visible summaries and detailed checkpoint evidence. |
 
-## Güvenlik sınırları
+## Safety boundaries
 
-- Aynı anda yalnızca bir UKB’ye yükleme yapılır.
-- Hedef UKB, bağlantı ayarlarından açıkça seçilir.
-- Power ve Recovery yazmaları geri okunarak doğrulanır.
-- Gerçek paket aktarımı ve hedef kapanışı seri/HTTP kanıtlarıyla izlenir.
-- Kurulum sonrası beklenen OFP sürümü ile okunan sürüm karşılaştırılır.
-- İptal ve uygulama kapanışı sırasında seçili hedef güvenli duruma alınmaya çalışılır.
-- Gerçek OFP/TEZI paketleri, saha logları, kullanıcıya özel ayarlar ve parolalar Git deposunda tutulmaz.
+- Only one FCC is updated at a time.
+- The target FCC must be explicitly selected.
+- Power and recovery writes are verified through readback.
+- Package transfer and target shutdown are evaluated using serial and HTTP evidence.
+- The expected OFP version is compared with the version reported after reboot.
+- Cancellation and application shutdown attempt to return the selected target to a safe state.
+- Real OFP/TEZI packages, field logs, credentials, and machine-specific settings are excluded from the repository.
 
-## Başlamadan önce
+## Field workstation prerequisites
 
-Saha bilgisayarında aşağıdaki koşullar sağlanmalıdır:
+- Windows 10 or Windows 11.
+- Administrator privileges.
+- Network access to the configured Moxa devices.
+- The correct FCC serial COM port available and not held by another application.
+- USB-NCM/OTG drivers installed and functioning.
+- A data-capable OTG cable connected directly to the workstation where possible.
+- Windows Defender Firewall rules permitting the application’s local HTTP and mDNS traffic.
+- A complete, approved TEZI package in the configured version repository.
+- Verified COM, baud rate, Moxa IP, slot, and channel mappings.
 
-- Desteklenen işletim sistemi: Windows 10 veya Windows 11.
-- Uygulama yönetici yetkisiyle çalıştırılmalıdır.
-- Moxa cihazlarına Ethernet üzerinden erişilebilmelidir.
-- UKB seri bağlantısına ait doğru COM portu Windows’ta görünmelidir.
-- USB-NCM/OTG aygıtı için gerekli Windows sürücüsü kurulu olmalıdır.
-- Tera Term gibi başka bir uygulama seçilen COM portunu kullanmamalıdır.
-- Windows Defender Güvenlik Duvarı uygulamanın yerel HTTP ve mDNS trafiğine izin vermelidir.
-- OTG kablosu veri aktarımını desteklemeli ve mümkünse doğrudan PC’ye bağlanmalıdır.
-- Masaüstündeki sürüm deposunda seçilen platforma ait eksiksiz TEZI paketi bulunmalıdır.
-- Bağlantı Ayarları içindeki COM, baud rate, Moxa IP, slot ve kanal eşleştirmeleri doğrulanmalıdır.
-
-
-## Ana ekran
+## Main interface
 
 ![Sanitized Version Installation main screen](.github/readme-assets/01-main-installation-sanitized-en.png)
 
+The main interface selects the platform profile, software version, and target FCC. Version folders are sorted naturally, the newest compatible package is selected by default, and deployment remains disabled until a valid TEZI structure is found.
 
-Ana ekrandan platform, sürüm ve hedef UKB seçilir. Uygulama, sürüm klasörlerini doğal sürüm sırasına göre listeler ve yüklenebilir TEZI yapısı bulunmadığında başlatma düğmesini etkinleştirmez.
+## FCC connection settings
 
-## UKB bağlantı ayarları
+![Sanitized FCC connection settings](.github/readme-assets/02-fcc-settings-sanitized-en.png)
 
-![Sanitized UKB connection settings](.github/readme-assets/02-ukb-settings-sanitized-en.png)
+Each FCC keeps its own COM, Power MOD/channel, and Recovery MOD/channel mapping. Shared Power Box IP, Relay Box IP, and baud-rate settings are managed in the same panel.
 
-
-Her UKB için COM, Power MOD/kanal ve Recovery MOD/kanal bilgileri ayrı tutulur. Power Box ve Relay Box IP adresleri ile ortak baud rate bu bölümden yönetilir.
-
-## Gelişmiş seçenekler
+## Advanced options
 
 ![Sanitized advanced options](.github/readme-assets/03-advanced-options-sanitized-en.png)
 
+The version repository, platform mappings, and optional TEZI package-prefix validation are managed here. User changes are stored in the application’s `Settings.json` profile.
 
-Sürüm deposu, platform eşlemeleri ve isteğe bağlı TEZI paket ön adı doğrulaması bu bölümden yönetilir. Kullanıcı değişiklikleri uygulamanın `Settings.json` profilinde saklanır.
+## Technical architecture
 
-## Teknik yaklaşım
+- **Application:** C# / .NET 8 / Windows Forms
+- **Distribution:** Self-contained Windows x86 field package
+- **Hardware control:** Moxa MXIO API
+- **Target communication:** Serial port, USB/UUU, and USB-NCM
+- **Package delivery:** Session-local HTTP server
+- **Service discovery:** DNS-SD / mDNS
+- **Installer environment:** Toradex Easy Installer
+- **Reliability controls:** Readback verification, bounded retries, timeouts, cancellation, and safe shutdown
+- **Observability:** Detailed session logs and stage-based checkpoints
 
-- **Uygulama:** C# / .NET 8 / Windows Forms
-- **Dağıtım:** Windows x86 için bağımsız saha paketi
-- **Donanım kontrolü:** Moxa MXIO API
-- **Hedef iletişimi:** Seri port, USB/UUU ve USB-NCM
-- **Paket sunumu:** Yerel HTTP sunucusu
-- **Keşif:** DNS-SD / mDNS
-- **Kurulum ortamı:** Toradex Easy Installer
-- **Güvenilirlik:** Geri okuma doğrulaması, kontrollü tekrar deneme, zaman aşımı, iptal ve güvenli kapatma
-- **İzlenebilirlik:** Ayrıntılı oturum logları ve aşama bazlı checkpoint kayıtları
+## Repository layout
 
-## Depo düzeni
-
-| Konum | Açıklama |
+| Location | Purpose |
 |---|---|
-| `Kaynak Kod/SurumYakma_Agdan` | Ana çözüm, uygulama ve otomatik test projesi |
-| `Kaynak Kod/Shared` | Ortak ayar, donanım algılama, yerelleştirme ve arayüz bileşenleri |
-| `Kaynak Kod/UKB/tezi` | Easy Installer recovery/UUU çalışma araçları |
-| `docs` | Kullanım, mimari, sorun giderme ve ekran görüntüleri |
-| GitHub Releases | Saha bilgisayarına taşınacak doğrulanmış dağıtım paketi |
+| `Kaynak Kod/SurumYakma_Agdan` | Main solution, application, and automated test project |
+| `Kaynak Kod/Shared` | Shared configuration, hardware detection, localization, and UI components |
+| `Kaynak Kod/UKB/tezi` | Toradex Easy Installer recovery and UUU runtime tools |
+| `.github/readme-assets` | Sanitized screenshots used by this README |
+| GitHub Releases | Versioned, ready-to-run Windows x86 field packages |
 
-## Dağıtım ilkesi
+The `Kaynak Kod` directory name is retained for compatibility with existing build and help-generation tooling; it represents the repository’s source tree.
 
-Saha kullanımı için GitHub Release içindeki ilgili **Windows x86 ZIP paketi** indirilmelidir. Her ZIP; çalıştırılabilir Uygulama klasörünü ve mevcutsa o sürüme ait temizlenmiş Kaynak Kod klasörünü birlikte içerir. GitHub'ın Release sayfasında gösterdiği SHA-256 özeti indirme bütünlüğünü doğrulamak için kullanılabilir.
+## Distribution policy
 
-Ana sayfada yalnızca güncel v1.0.3 sürümü anlatılır. USB ve v1.0.0-v1.0.2 arşivleri geriye dönük inceleme ve gerektiğinde indirme amacıyla Releases bölümünde korunur.
+Field users should download the required **Windows x86 ZIP package** from GitHub Releases. Each ZIP contains the runnable application and, where available, the cleaned source tree associated with that release. GitHub’s SHA-256 asset digest can be used to verify download integrity.
 
-Uygulama klasöründeki `Settings.json` bilgisayara ve platforma özel olabilir. Başka bir bilgisayara taşınırken COM, Moxa IP, slot/kanal ve USB-NCM ayarları yeniden kontrol edilmelidir.
+The main page documents only the current v1.0.3 release. The USB workflow and v1.0.0–v1.0.2 packages remain available as historical releases.
 
-## Kayıt ve teşhis
+The application’s `Settings.json` may contain workstation- and platform-specific values. COM, Moxa IP, slot/channel, and USB-NCM settings must be verified whenever the application is moved to another workstation.
 
-Her çalıştırmada `logs` klasöründe ayrı bir oturum kaydı oluşturulur. Ayrıntılı loglarda:
+## Logging and diagnostics
 
-- işlem başlangıç ve bitişleri,
-- seçilen platform/sürüm/UKB,
-- Moxa bağlantı ve geri okuma sonuçları,
-- USB/UUU ve USB-NCM algılama adımları,
-- HTTP ve mDNS istekleri,
-- paket aktarım kanıtları,
-- seri konsol doğrulamaları,
-- hata, tekrar deneme, iptal ve temizleme sonuçları
+Every run creates a separate session log under the `logs` directory. Detailed logs include:
 
-zaman damgası ve checkpoint kimliğiyle kaydedilir.
+- operation start and completion,
+- selected profile, version, and FCC,
+- Moxa connection and readback results,
+- USB/UUU and USB-NCM detection stages,
+- HTTP and mDNS activity,
+- package-transfer evidence,
+- serial-console verification,
+- failures, retries, cancellation, and cleanup results.
 
-## Gizlilik
+Each record includes a timestamp and, where applicable, a checkpoint identifier.
 
-Depoya aşağıdaki içerikler eklenmemelidir:
+## Confidentiality
 
-- gerçek uçuş yazılımı veya OFP/TEZI paketleri,
-- saha logları,
-- kullanıcıya özel `Settings.json`,
-- cihaz parolaları ve erişim bilgileri,
-- kurum içi hassas ağ ve donanım yapılandırmaları.
+Do not commit or publish:
 
-Bu depo yalnızca yetkilendirilmiş geliştirme ve bakım süreçlerinde kullanılmalıdır.
+- real flight software or OFP/TEZI packages,
+- field logs,
+- workstation-specific `Settings.json`,
+- passwords or device credentials,
+- organization-specific network, platform, or hardware mappings.
+
+This repository is intended only for authorized engineering, test, and maintenance activities.
