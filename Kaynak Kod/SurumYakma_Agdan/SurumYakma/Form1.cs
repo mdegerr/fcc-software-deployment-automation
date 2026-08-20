@@ -3909,11 +3909,14 @@ namespace SurumYakma
                         _cts.Token,
                         "NETWORK_POWER_OFF_AFTER_INSTALL"));
                 powerOn = false;
-                await Task.Delay(500, _cts.Token);
+                // Moxa geri okumasinin OFF olmasi UKB giris kapasitelerinin tamamen
+                // bosaldigini garanti etmez. Ozellikle arka arkaya yuklemelerde kisa
+                // kesinti hedefin yeniden acilmamasina yol acabiliyor.
+                await Task.Delay(2000, _cts.Token);
                 Logger.Checkpoint(
                     "NETWORK_POWER_OFF_SETTLE",
                     "SUCCESS",
-                    "delayMs=500; Power=OFF geri okundu");
+                    "delayMs=2000; Power=OFF geri okundu; target discharge wait completed");
 
                 lblStatus.Text = "Recovery modu NORMAL yapılıyor...";
                 currentStage = "NETWORK_RECOVERY_NORMAL";
@@ -3949,6 +3952,70 @@ namespace SurumYakma
                     "SUCCESS",
                     "Power=ON; Recovery=NORMAL; normalBootVerification=started");
                 SetNetworkStage(12, "OFP Sürümü ve Network Up Doğrulanıyor");
+                // Seri port acik gorunse bile art arda guc dongulerinden sonra Windows
+                // surucusu veri iletmeyebilir veya UKB gercekte yeniden baslamamis olabilir.
+                // Bos yere 300 saniye beklemek yerine once aktiviteyi denetle; veri yoksa
+                // portu yenile ve Recovery NORMAL durumunda tek kontrollu acilis tekrari yap.
+                try
+                {
+                    await _serial.WaitForActivityAsync(
+                        normalBootMark,
+                        TimeSpan.FromSeconds(25),
+                        _cts.Token);
+                    Logger.Checkpoint(
+                        "NETWORK_NORMAL_BOOT_SERIAL_ACTIVITY",
+                        "SUCCESS",
+                        $"ukb={ukbLabel}; attempt=1; port={_serial.PortName}");
+                }
+                catch (TimeoutException firstBootTimeout)
+                {
+                    Logger.Checkpoint(
+                        "NETWORK_NORMAL_BOOT_SERIAL_ACTIVITY",
+                        "RETRY",
+                        $"ukb={ukbLabel}; attempt=1; reason=no-serial-data; message={firstBootTimeout.Message}");
+                    Logger.Warn("Normal acilista seri veri gelmedi; seri port yenilenip UKB bir kez kontrollu yeniden baslatiliyor.");
+                    lblStatus.Text = "Normal acilis seri baglantisi yenileniyor...";
+
+                    _serial.Dispose();
+                    await Task.Delay(300, _cts.Token);
+                    _serial.Open();
+                    Logger.Checkpoint(
+                        "NETWORK_NORMAL_BOOT_SERIAL_REOPEN",
+                        "SUCCESS",
+                        $"ukb={ukbLabel}; port={_serial.PortName}");
+
+                    await SetPowerAndVerifyAsync(
+                        whichUkb,
+                        0,
+                        _cts.Token,
+                        "NETWORK_NORMAL_BOOT_RETRY_POWER_OFF");
+                    powerOn = false;
+                    await Task.Delay(2000, _cts.Token);
+                    await SetRecoveryAndVerifyAsync(
+                        whichUkb,
+                        0,
+                        _cts.Token,
+                        "NETWORK_NORMAL_BOOT_RETRY_RECOVERY_NORMAL");
+                    recoveryEnabled = false;
+                    await Task.Delay(1000, _cts.Token);
+
+                    normalBootMark = _serial.Mark();
+                    await SetPowerAndVerifyAsync(
+                        whichUkb,
+                        1,
+                        _cts.Token,
+                        "NETWORK_NORMAL_BOOT_RETRY_POWER_ON");
+                    powerOn = true;
+                    await _serial.WaitForActivityAsync(
+                        normalBootMark,
+                        TimeSpan.FromSeconds(30),
+                        _cts.Token);
+                    Logger.Checkpoint(
+                        "NETWORK_NORMAL_BOOT_SERIAL_ACTIVITY",
+                        "RECOVERED",
+                        $"ukb={ukbLabel}; attempt=2; port={_serial.PortName}; sequence=serial-reopen-power-cycle");
+                }
+
                 currentStage = "NETWORK_OFP_VERSION_VERIFY";
                 observedOfpVersion = await RunLoggedStageAsync(
                     currentStage,
@@ -3997,11 +4064,18 @@ namespace SurumYakma
                 catch (TimeoutException ex)
                 {
                     observedNetworkUpLine = null;
+                    string ethernetFailure;
+                    bool physicalFailureSeen = _serial.TryGetPhysicalEthernetFailureSince(
+                        normalBootMark,
+                        out ethernetFailure);
+                    string linkDetails = physicalFailureSeen
+                        ? " UKB eth0 physical error: " + ethernetFailure
+                        : "";
                     Logger.Warn("Ağ hazır/Link Up satırı 45 saniye içinde görülmedi; OFP sürümü doğrulandığı için sonuç korunuyor.");
                     Logger.Checkpoint(
                         "NETWORK_NORMAL_BOOT_NETWORK_UP",
                         "WARNING",
-                        ex.Message);
+                        ex.Message + linkDetails);
                 }
 
                 installationSuccessful = true;

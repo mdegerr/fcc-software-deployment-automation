@@ -295,6 +295,40 @@ namespace SurumYakma
                 ct);
         }
 
+        public Task<string> WaitForActivityAsync(
+            long afterSequence,
+            TimeSpan timeout,
+            CancellationToken ct)
+        {
+            return WaitForMatchAsync(
+                afterSequence,
+                line => string.IsNullOrWhiteSpace(line) ? null : line,
+                timeout,
+                "normal acilis seri konsol verisi",
+                ct);
+        }
+
+        public bool TryGetPhysicalEthernetFailureSince(long afterSequence, out string evidence)
+        {
+            lock (_sync)
+            {
+                SerialLine failure = _history
+                    .Where(item => item.Sequence > afterSequence)
+                    .LastOrDefault(item =>
+                        item.Text.IndexOf("eth0", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        (item.Text.IndexOf("Unable to connect to phy", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                         item.Text.IndexOf("Link is Down", StringComparison.OrdinalIgnoreCase) >= 0));
+                if (failure != null)
+                {
+                    evidence = failure.Text.Trim();
+                    return true;
+                }
+            }
+
+            evidence = null;
+            return false;
+        }
+
         public Task<string> WaitForNetworkUpAsync(
             long afterSequence,
             TimeSpan timeout,
